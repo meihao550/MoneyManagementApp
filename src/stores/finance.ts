@@ -4,19 +4,18 @@ import { supabase } from '@/lib/supabaseClient'
 import type { Expense, MonthlyBill, Profile, SavingsGoal } from '@/lib/types'
 import { useAuthStore } from '@/stores/auth'
 
-function monthsUntil(targetDate: string): number {
-  const now = new Date()
-  const target = new Date(targetDate)
-  const diffMs = target.getTime() - now.getTime()
-  const diffDays = diffMs / (1000 * 60 * 60 * 24)
-  return Math.max(diffDays / 30.4375, 1 / 30.4375)
-}
+const AVG_DAYS_PER_MONTH = 30.4375
 
 function formatDate(d: Date): string {
   const y = d.getFullYear()
   const m = String(d.getMonth() + 1).padStart(2, '0')
   const day = String(d.getDate()).padStart(2, '0')
   return `${y}-${m}-${day}`
+}
+
+function daysBetween(from: Date, to: Date): number {
+  const ms = to.getTime() - from.getTime()
+  return Math.max(Math.ceil(ms / (1000 * 60 * 60 * 24)), 1)
 }
 
 function monthRange(now = new Date()) {
@@ -33,7 +32,7 @@ export const useFinanceStore = defineStore('finance', () => {
   const loading = ref(false)
   const errorMessage = ref<string | null>(null)
 
-  const monthlySalary = computed(() => Number(profile.value?.monthly_salary ?? 0))
+  const bankBalance = computed(() => Number(profile.value?.bank_balance ?? 0))
 
   const totalMonthlyBills = computed(() =>
     bills.value.reduce((sum, b) => sum + Number(b.amount), 0),
@@ -41,25 +40,30 @@ export const useFinanceStore = defineStore('finance', () => {
 
   const goalTargetAmount = computed(() => Number(goal.value?.target_amount ?? 0))
 
-  // 目標達成日までの残り月数（表示用に小数第1位まで丸め）
+  // 予算計算の期限: 目標があればその日付、なければ今月末
+  const horizonDate = computed(() => {
+    if (goal.value) return new Date(goal.value.target_date)
+    const now = new Date()
+    return new Date(now.getFullYear(), now.getMonth() + 1, 0)
+  })
+
+  const daysUntilHorizon = computed(() => daysBetween(new Date(), horizonDate.value))
+
+  const monthsUntilHorizon = computed(() => daysUntilHorizon.value / AVG_DAYS_PER_MONTH)
+
+  // 目標達成日までの残り月数（表示用）
   const monthsToGoal = computed(() => {
     if (!goal.value) return 0
-    return Math.round(monthsUntil(goal.value.target_date) * 10) / 10
+    return Math.round(monthsUntilHorizon.value * 10) / 10
   })
 
-  const requiredMonthlySaving = computed(() => {
-    if (!goal.value) return 0
-    const months = monthsUntil(goal.value.target_date)
-    return Math.ceil(goalTargetAmount.value / months)
-  })
-
-  // 今月の変動費として使える予算（消費前）
-  const monthlyBudget = computed(() =>
-    Math.max(
-      monthlySalary.value - totalMonthlyBills.value - requiredMonthlySaving.value,
-      0,
-    ),
+  // 目標日までに支払う予定の固定費合計（見込み）
+  const projectedBills = computed(() =>
+    Math.ceil(totalMonthlyBills.value * monthsUntilHorizon.value),
   )
+
+  // 目標達成のために口座に残しておくべき金額
+  const reservedForGoal = computed(() => goalTargetAmount.value)
 
   // 今月の消費合計
   const totalSpentThisMonth = computed(() =>
@@ -74,30 +78,48 @@ export const useFinanceStore = defineStore('finance', () => {
       .reduce((sum, e) => sum + Number(e.amount), 0)
   })
 
-  // 消費を差し引いた今月の残り予算
-  const remainingMonthlyBudget = computed(() =>
-    monthlyBudget.value - totalSpentThisMonth.value,
+  // 目標日までに使える総額（変動費）
+  // = 預金 − 目標分 − 今後の固定費 − すでに今月使った額
+  const spendableUntilHorizon = computed(() =>
+    bankBalance.value - reservedForGoal.value - projectedBills.value - totalSpentThisMonth.value,
   )
 
+  const isOverBudget = computed(() => spendableUntilHorizon.value < 0)
+
+  // 1日あたり使える額
+  const dailySpendable = computed(() =>
+    daysUntilHorizon.value > 0
+      ? Math.floor(spendableUntilHorizon.value / daysUntilHorizon.value)
+      : 0,
+  )
+
+  const weeklySpendable = computed(() => Math.floor(dailySpendable.value * 7))
+
+  // 月換算した使える額
+  const monthlySpendable = computed(() =>
+    Math.floor(dailySpendable.value * AVG_DAYS_PER_MONTH),
+  )
+
+  // 今月末までに使える見込み（1日あたり × 今月残日数）
   const daysLeftInMonth = computed(() => {
     const now = new Date()
     const end = new Date(now.getFullYear(), now.getMonth() + 1, 0)
     return end.getDate() - now.getDate() + 1
   })
 
-  // 今日から月末までの1日あたり使える額（残り予算ベース）
-  const dailyRemaining = computed(() =>
-    daysLeftInMonth.value > 0
-      ? Math.floor(remainingMonthlyBudget.value / daysLeftInMonth.value)
-      : 0,
+  // 今日の残り（1日の予算 − 今日使った額）
+  const todayRemaining = computed(() => dailySpendable.value - spentToday.value)
+
+  // 目標達成度（0〜1）
+  const goalProgress = computed(() => {
+    if (!goal.value || goalTargetAmount.value <= 0) return 0
+    return Math.min(bankBalance.value / goalTargetAmount.value, 1)
+  })
+
+  // 目標達成に不足している額
+  const goalRemainingToSave = computed(() =>
+    Math.max(goalTargetAmount.value - bankBalance.value, 0),
   )
-
-  const weeklyRemaining = computed(() => Math.floor(dailyRemaining.value * 7))
-
-  // 今日のノルマに対する残り（今日の日割り − 今日使った分）
-  const todayRemaining = computed(() => dailyRemaining.value - spentToday.value)
-
-  const isOverBudget = computed(() => remainingMonthlyBudget.value < 0)
 
   // 日付ごとの支出まとめ（新しい順）
   const expensesByDay = computed(() => {
@@ -163,12 +185,12 @@ export const useFinanceStore = defineStore('finance', () => {
     }
   }
 
-  async function saveSalary(amount: number) {
+  async function saveBankBalance(amount: number) {
     const auth = useAuthStore()
     if (!auth.user) return
     const payload = {
       user_id: auth.user.id,
-      monthly_salary: amount,
+      bank_balance: amount,
       updated_at: new Date().toISOString(),
     }
     const { data, error } = await supabase
@@ -263,7 +285,6 @@ export const useFinanceStore = defineStore('finance', () => {
       errorMessage.value = error.message
       return
     }
-    // 挿入したものが今月分なら先頭に反映
     const { start, end } = monthRange()
     if (spent_on >= start && spent_on <= end) {
       expenses.value = [data as Expense, ...expenses.value]
@@ -294,23 +315,29 @@ export const useFinanceStore = defineStore('finance', () => {
     expenses,
     loading,
     errorMessage,
-    monthlySalary,
+    bankBalance,
     totalMonthlyBills,
     goalTargetAmount,
+    horizonDate,
+    daysUntilHorizon,
+    monthsUntilHorizon,
     monthsToGoal,
-    requiredMonthlySaving,
-    monthlyBudget,
+    projectedBills,
+    reservedForGoal,
     totalSpentThisMonth,
     spentToday,
-    remainingMonthlyBudget,
-    dailyRemaining,
-    weeklyRemaining,
-    todayRemaining,
+    spendableUntilHorizon,
     isOverBudget,
+    dailySpendable,
+    weeklySpendable,
+    monthlySpendable,
     daysLeftInMonth,
+    todayRemaining,
+    goalProgress,
+    goalRemainingToSave,
     expensesByDay,
     fetchAll,
-    saveSalary,
+    saveBankBalance,
     saveGoal,
     addBill,
     removeBill,

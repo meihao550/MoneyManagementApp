@@ -8,8 +8,13 @@
 create table if not exists public.profiles (
   user_id       uuid primary key references auth.users(id) on delete cascade,
   monthly_salary numeric(12, 0) not null default 0,
+  bank_balance   numeric(12, 0) not null default 0,
   updated_at    timestamptz not null default now()
 );
+
+-- 既存プロジェクトで profiles だけ先に作っていた場合の追従
+alter table public.profiles
+  add column if not exists bank_balance numeric(12, 0) not null default 0;
 
 alter table public.profiles enable row level security;
 

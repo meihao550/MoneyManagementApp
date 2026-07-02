@@ -1,6 +1,7 @@
 export interface Profile {
   user_id: string
   monthly_salary: number
+  bank_balance: number
   updated_at: string
 }
 

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { RouterLink } from 'vue-router'
 import { useFinanceStore } from '@/stores/finance'
 import { formatYen } from '@/lib/format'
@@ -10,6 +10,13 @@ const expenseName = ref('')
 const expenseAmount = ref<number | null>(null)
 const expenseDate = ref<string>(new Date().toISOString().slice(0, 10))
 const submitting = ref(false)
+
+const horizonLabel = computed(() => {
+  const d = finance.horizonDate
+  return d.toLocaleDateString('ja-JP')
+})
+
+const horizonKind = computed(() => (finance.goal ? '目標日' : '今月末'))
 
 onMounted(() => {
   finance.fetchAll()
@@ -41,7 +48,7 @@ async function removeExpense(id: string) {
       <div>
         <h1 class="text-3xl font-bold text-slate-800">ダッシュボード</h1>
         <p class="text-slate-500 mt-1">
-          今日いくら使えるか、残りいくらかを確認しましょう
+          {{ horizonKind }}（{{ horizonLabel }}）まで、預金から計画的に使いましょう
         </p>
       </div>
       <RouterLink
@@ -56,10 +63,13 @@ async function removeExpense(id: string) {
     >{{ finance.errorMessage }}</div>
 
     <div
-      v-if="!finance.loading && finance.monthlySalary === 0"
+      v-if="!finance.loading && finance.bankBalance === 0"
       class="rounded-xl border border-dashed border-slate-300 bg-white p-8 text-center"
     >
-      <p class="text-slate-500 mb-4">まだ月給が登録されていません。</p>
+      <p class="text-slate-500 mb-4">
+        まだ銀行の預金残高が登録されていません。<br />
+        すべての計算は預金額を元に行います。
+      </p>
       <RouterLink
         to="/settings"
         class="inline-block rounded-md bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 text-sm font-medium"
@@ -67,7 +77,21 @@ async function removeExpense(id: string) {
     </div>
 
     <div v-else class="space-y-8">
-      <!-- メインの3枚（残り予算ベース） -->
+      <!-- 預金サマリ -->
+      <div class="rounded-2xl bg-white border border-slate-200 p-5 flex items-center justify-between">
+        <div>
+          <p class="text-xs text-slate-500">銀行の預金残高</p>
+          <p class="mt-1 text-2xl font-bold text-slate-800">
+            {{ formatYen(finance.bankBalance) }}
+          </p>
+        </div>
+        <RouterLink
+          to="/settings"
+          class="text-sm text-indigo-600 hover:underline"
+        >更新</RouterLink>
+      </div>
+
+      <!-- メインの3枚（預金ベース） -->
       <div class="grid gap-4 md:grid-cols-3">
         <div
           class="rounded-2xl text-white p-6 shadow"
@@ -75,33 +99,33 @@ async function removeExpense(id: string) {
             ? 'bg-gradient-to-br from-rose-500 to-rose-700'
             : 'bg-gradient-to-br from-indigo-500 to-indigo-700'"
         >
-          <p class="text-sm opacity-80">今月の残り予算</p>
+          <p class="text-sm opacity-80">{{ horizonKind }}まで使える予算</p>
           <p class="mt-2 text-3xl font-bold">
-            {{ formatYen(finance.remainingMonthlyBudget) }}
+            {{ formatYen(finance.spendableUntilHorizon) }}
           </p>
           <p class="mt-1 text-xs opacity-80">
-            予算 {{ formatYen(finance.monthlyBudget) }} − 使用 {{ formatYen(finance.totalSpentThisMonth) }}
+            残り {{ finance.daysUntilHorizon }} 日
           </p>
         </div>
         <div class="rounded-2xl bg-white border border-slate-200 p-6 shadow-sm">
-          <p class="text-sm text-slate-500">今週使える（残り予算基準）</p>
+          <p class="text-sm text-slate-500">1週間に使える</p>
           <p class="mt-2 text-3xl font-bold text-slate-800">
-            {{ formatYen(finance.weeklyRemaining) }}
+            {{ formatYen(finance.weeklySpendable) }}
           </p>
           <p class="mt-1 text-xs text-slate-400">日割り × 7日</p>
         </div>
         <div class="rounded-2xl bg-white border border-slate-200 p-6 shadow-sm">
-          <p class="text-sm text-slate-500">今日から1日に使える</p>
+          <p class="text-sm text-slate-500">1日に使える</p>
           <p class="mt-2 text-3xl font-bold text-slate-800">
-            {{ formatYen(finance.dailyRemaining) }}
+            {{ formatYen(finance.dailySpendable) }}
           </p>
           <p class="mt-1 text-xs text-slate-400">
-            残り {{ finance.daysLeftInMonth }} 日
+            {{ horizonKind }}までの日割り
           </p>
         </div>
       </div>
 
-      <!-- 今日のノルマ -->
+      <!-- 今日の状況 -->
       <div class="rounded-2xl bg-white border border-slate-200 p-6">
         <div class="flex items-center justify-between mb-3">
           <h2 class="font-semibold text-slate-800">今日の状況</h2>
@@ -119,7 +143,7 @@ async function removeExpense(id: string) {
           <div>
             <p class="text-slate-500">今日の予算</p>
             <p class="mt-1 text-xl font-bold text-slate-800">
-              {{ formatYen(finance.dailyRemaining) }}
+              {{ formatYen(finance.dailySpendable) }}
             </p>
           </div>
           <div>
@@ -134,7 +158,7 @@ async function removeExpense(id: string) {
         </div>
       </div>
 
-      <!-- 支出のクイック入力（家計簿） -->
+      <!-- 支出のクイック入力 -->
       <div class="rounded-2xl bg-white border border-slate-200 p-6">
         <h2 class="font-semibold text-slate-800 mb-4">支出を記録</h2>
         <form
@@ -174,49 +198,42 @@ async function removeExpense(id: string) {
       <!-- 内訳と目標 -->
       <div class="grid gap-4 md:grid-cols-2">
         <div class="rounded-2xl bg-white border border-slate-200 p-6">
-          <h2 class="font-semibold text-slate-800 mb-4">今月の内訳</h2>
+          <h2 class="font-semibold text-slate-800 mb-4">{{ horizonKind }}までの内訳</h2>
           <dl class="text-sm divide-y divide-slate-100">
             <div class="flex justify-between py-2">
-              <dt class="text-slate-500">月給</dt>
-              <dd class="font-medium">{{ formatYen(finance.monthlySalary) }}</dd>
+              <dt class="text-slate-500">銀行の預金</dt>
+              <dd class="font-medium">{{ formatYen(finance.bankBalance) }}</dd>
             </div>
-            <div class="flex justify-between py-2">
-              <dt class="text-slate-500">固定支払い合計</dt>
-              <dd class="font-medium text-rose-600">
-                − {{ formatYen(finance.totalMonthlyBills) }}
+            <div v-if="finance.goal" class="flex justify-between py-2">
+              <dt class="text-slate-500">目標分（残す金額）</dt>
+              <dd class="font-medium text-emerald-600">
+                − {{ formatYen(finance.reservedForGoal) }}
               </dd>
             </div>
             <div class="flex justify-between py-2">
               <dt class="text-slate-500">
-                月あたりの貯金
-                <span
-                  v-if="finance.goal"
-                  class="block text-xs text-slate-400"
-                >
-                  {{ formatYen(finance.goalTargetAmount) }} ÷ 約{{ finance.monthsToGoal }}ヶ月
+                {{ horizonKind }}までの固定費（見込み）
+                <span class="block text-xs text-slate-400">
+                  {{ formatYen(finance.totalMonthlyBills) }} × 約{{ finance.monthsToGoal || Math.round(finance.monthsUntilHorizon * 10) / 10 }}ヶ月
                 </span>
               </dt>
-              <dd class="font-medium text-emerald-600">
-                − {{ formatYen(finance.requiredMonthlySaving) }}
+              <dd class="font-medium text-rose-600">
+                − {{ formatYen(finance.projectedBills) }}
               </dd>
             </div>
             <div class="flex justify-between py-2">
-              <dt class="text-slate-500">変動費の予算</dt>
-              <dd class="font-medium">{{ formatYen(finance.monthlyBudget) }}</dd>
-            </div>
-            <div class="flex justify-between py-2">
-              <dt class="text-slate-500">今月の消費</dt>
+              <dt class="text-slate-500">今月の消費（記録済み）</dt>
               <dd class="font-medium text-rose-600">
                 − {{ formatYen(finance.totalSpentThisMonth) }}
               </dd>
             </div>
             <div class="flex justify-between py-3 border-t border-slate-200 mt-1">
-              <dt class="font-semibold text-slate-800">残り</dt>
+              <dt class="font-semibold text-slate-800">使える残り</dt>
               <dd
                 class="font-bold"
                 :class="finance.isOverBudget ? 'text-rose-600' : 'text-indigo-700'"
               >
-                {{ formatYen(finance.remainingMonthlyBudget) }}
+                {{ formatYen(finance.spendableUntilHorizon) }}
               </dd>
             </div>
           </dl>
@@ -228,9 +245,16 @@ async function removeExpense(id: string) {
             <p class="text-slate-500">タイトル</p>
             <p class="font-medium text-slate-800">{{ finance.goal.title }}</p>
 
-            <p class="text-slate-500 mt-3">目標金額</p>
-            <p class="font-medium text-slate-800">
-              {{ formatYen(finance.goalTargetAmount) }}
+            <p class="text-slate-500 mt-3">達成状況</p>
+            <div class="w-full h-2 bg-slate-100 rounded-full overflow-hidden">
+              <div
+                class="h-full bg-emerald-500 transition-all"
+                :style="{ width: `${Math.round(finance.goalProgress * 100)}%` }"
+              />
+            </div>
+            <p class="text-xs text-slate-500 mt-1">
+              {{ formatYen(finance.bankBalance) }} / {{ formatYen(finance.goalTargetAmount) }}
+              （{{ Math.round(finance.goalProgress * 100) }}%）
             </p>
 
             <p class="text-slate-500 mt-3">達成予定日</p>
@@ -239,10 +263,9 @@ async function removeExpense(id: string) {
               <span class="text-xs text-slate-400">（残り約{{ finance.monthsToGoal }}ヶ月）</span>
             </p>
 
-            <p class="text-slate-500 mt-3">月あたり必要な貯金</p>
-            <p class="font-bold text-emerald-600">
-              {{ formatYen(finance.requiredMonthlySaving) }}
-              <span class="text-xs font-normal text-slate-400">/ 月</span>
+            <p class="text-slate-500 mt-3">達成まで不足</p>
+            <p class="font-medium text-slate-800">
+              {{ formatYen(finance.goalRemainingToSave) }}
             </p>
           </div>
           <p v-else class="text-sm text-slate-500">

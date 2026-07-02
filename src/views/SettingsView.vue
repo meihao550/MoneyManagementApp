@@ -5,19 +5,19 @@ import { formatYen } from '@/lib/format'
 
 const finance = useFinanceStore()
 
-const salaryInput = ref<number | null>(null)
+const bankBalanceInput = ref<number | null>(null)
 const goalTitle = ref('貯金目標')
 const goalAmount = ref<number | null>(null)
 const goalDate = ref<string>('')
 const billName = ref('')
 const billAmount = ref<number | null>(null)
 
-const savingSalary = ref(false)
+const savingBankBalance = ref(false)
 const savingGoal = ref(false)
 const savingBill = ref(false)
 
 function syncFromStore() {
-  salaryInput.value = finance.monthlySalary || null
+  bankBalanceInput.value = finance.bankBalance || null
   if (finance.goal) {
     goalTitle.value = finance.goal.title
     goalAmount.value = Number(finance.goal.target_amount)
@@ -33,11 +33,11 @@ onMounted(async () => {
 watch(() => finance.profile, syncFromStore)
 watch(() => finance.goal, syncFromStore)
 
-async function submitSalary() {
-  if (salaryInput.value === null || salaryInput.value < 0) return
-  savingSalary.value = true
-  await finance.saveSalary(Number(salaryInput.value))
-  savingSalary.value = false
+async function submitBankBalance() {
+  if (bankBalanceInput.value === null || bankBalanceInput.value < 0) return
+  savingBankBalance.value = true
+  await finance.saveBankBalance(Number(bankBalanceInput.value))
+  savingBankBalance.value = false
 }
 
 async function submitGoal() {
@@ -74,7 +74,7 @@ async function deleteBill(id: string) {
     <div>
       <h1 class="text-3xl font-bold text-slate-800">設定</h1>
       <p class="text-slate-500 mt-1">
-        月給・貯金目標・毎月の支払いを入力してください
+        預金・貯金目標・毎月の支払いを入力してください
       </p>
     </div>
 
@@ -83,29 +83,32 @@ async function deleteBill(id: string) {
       class="rounded-md bg-red-50 border border-red-200 text-red-700 px-4 py-3 text-sm"
     >{{ finance.errorMessage }}</div>
 
-    <!-- 月給 -->
+    <!-- 銀行預金 -->
     <section class="rounded-2xl bg-white border border-slate-200 p-6">
-      <h2 class="font-semibold text-slate-800 mb-4">月給（手取り）</h2>
-      <form @submit.prevent="submitSalary" class="flex gap-3 items-end">
+      <h2 class="font-semibold text-slate-800 mb-1">銀行の預金残高</h2>
+      <p class="text-xs text-slate-500 mb-4">
+        すべての計算の起点となる金額です。定期的に最新の残高に更新してください。
+      </p>
+      <form @submit.prevent="submitBankBalance" class="flex gap-3 items-end">
         <div class="flex-1">
-          <label class="block text-xs text-slate-500 mb-1">1ヶ月の収入</label>
+          <label class="block text-xs text-slate-500 mb-1">現在の残高</label>
           <div class="relative">
             <span class="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">¥</span>
             <input
-              v-model.number="salaryInput"
+              v-model.number="bankBalanceInput"
               type="number"
               min="0"
               step="1000"
-              placeholder="250000"
+              placeholder="500000"
               class="w-full rounded-md border border-slate-300 pl-8 pr-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500"
             />
           </div>
         </div>
         <button
           type="submit"
-          :disabled="savingSalary"
+          :disabled="savingBankBalance"
           class="rounded-md bg-indigo-600 hover:bg-indigo-700 disabled:opacity-60 text-white px-4 py-2 text-sm font-medium"
-        >{{ savingSalary ? '保存中…' : '保存' }}</button>
+        >{{ savingBankBalance ? '保存中…' : '保存' }}</button>
       </form>
     </section>
 
@@ -146,9 +149,9 @@ async function deleteBill(id: string) {
         </div>
         <div class="md:col-span-2 flex items-center justify-between">
           <p class="text-sm text-slate-500">
-            月あたり必要な貯金:
+            達成まで不足:
             <span class="font-semibold text-emerald-600">
-              {{ formatYen(finance.requiredMonthlySaving) }}
+              {{ formatYen(finance.goalRemainingToSave) }}
             </span>
           </p>
           <button
