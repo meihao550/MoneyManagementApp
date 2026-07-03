@@ -5,23 +5,34 @@ import { formatYen } from '@/lib/format'
 
 const finance = useFinanceStore()
 
-const bankBalanceInput = ref<number | null>(null)
+const monthCloseDayInput = ref<number>(25)
 const goalTitle = ref('貯金目標')
 const goalAmount = ref<number | null>(null)
 const goalDate = ref<string>('')
 const billName = ref('')
 const billAmount = ref<number | null>(null)
 
-const savingBankBalance = ref(false)
+const savingMonthCloseDay = ref(false)
 const savingGoal = ref(false)
 const savingBill = ref(false)
+const deletingGoal = ref(false)
+
+const dayOptions = Array.from({ length: 31 }, (_, i) => i + 1)
+
+function formatDate(d: Date): string {
+  return d.toLocaleDateString('ja-JP', { year: 'numeric', month: 'long', day: 'numeric' })
+}
 
 function syncFromStore() {
-  bankBalanceInput.value = finance.bankBalance || null
+  monthCloseDayInput.value = finance.monthCloseDay || 25
   if (finance.goal) {
     goalTitle.value = finance.goal.title
     goalAmount.value = Number(finance.goal.target_amount)
     goalDate.value = finance.goal.target_date
+  } else {
+    goalTitle.value = '貯金目標'
+    goalAmount.value = null
+    goalDate.value = ''
   }
 }
 
@@ -33,11 +44,11 @@ onMounted(async () => {
 watch(() => finance.profile, syncFromStore)
 watch(() => finance.goal, syncFromStore)
 
-async function submitBankBalance() {
-  if (bankBalanceInput.value === null || bankBalanceInput.value < 0) return
-  savingBankBalance.value = true
-  await finance.saveBankBalance(Number(bankBalanceInput.value))
-  savingBankBalance.value = false
+async function submitMonthCloseDay() {
+  if (!monthCloseDayInput.value || monthCloseDayInput.value < 1 || monthCloseDayInput.value > 31) return
+  savingMonthCloseDay.value = true
+  await finance.saveMonthCloseDay(Number(monthCloseDayInput.value))
+  savingMonthCloseDay.value = false
 }
 
 async function submitGoal() {
@@ -67,6 +78,13 @@ async function deleteBill(id: string) {
   if (!confirm('この支払いを削除しますか？')) return
   await finance.removeBill(id)
 }
+
+async function resetGoal() {
+  if (!confirm('貯金目標を削除します。よろしいですか？')) return
+  deletingGoal.value = true
+  await finance.deleteGoal()
+  deletingGoal.value = false
+}
 </script>
 
 <template>
@@ -74,7 +92,7 @@ async function deleteBill(id: string) {
     <div>
       <h1 class="text-3xl font-bold text-slate-800">設定</h1>
       <p class="text-slate-500 mt-1">
-        預金・貯金目標・毎月の支払いを入力してください
+        月じめ日・貯金目標・毎月の支払いを入力してください。総資産はダッシュボードで管理します。
       </p>
     </div>
 
@@ -83,38 +101,49 @@ async function deleteBill(id: string) {
       class="rounded-md bg-red-50 border border-red-200 text-red-700 px-4 py-3 text-sm"
     >{{ finance.errorMessage }}</div>
 
-    <!-- 銀行預金 -->
+    <!-- 月じめ日 -->
     <section class="rounded-2xl bg-white border border-slate-200 p-6">
-      <h2 class="font-semibold text-slate-800 mb-1">銀行の預金残高</h2>
+      <h2 class="font-semibold text-slate-800 mb-1">月じめ日（給料日／締め日）</h2>
       <p class="text-xs text-slate-500 mb-4">
-        すべての計算の起点となる金額です。定期的に最新の残高に更新してください。
+        毎月お金の区切りとして使う日付です。例: 25日締めなら、毎月25日〜翌月24日を「1ヶ月」として計算します。
       </p>
-      <form @submit.prevent="submitBankBalance" class="flex gap-3 items-end">
-        <div class="flex-1">
-          <label class="block text-xs text-slate-500 mb-1">現在の残高</label>
-          <div class="relative">
-            <span class="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">¥</span>
-            <input
-              v-model.number="bankBalanceInput"
-              type="number"
-              min="0"
-              step="1000"
-              placeholder="500000"
-              class="w-full rounded-md border border-slate-300 pl-8 pr-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-            />
-          </div>
+      <form @submit.prevent="submitMonthCloseDay" class="flex gap-3 items-end">
+        <div class="flex-1 max-w-[200px]">
+          <label class="block text-xs text-slate-500 mb-1">締め日</label>
+          <select
+            v-model.number="monthCloseDayInput"
+            class="w-full rounded-md border border-slate-300 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+          >
+            <option v-for="d in dayOptions" :key="d" :value="d">
+              毎月 {{ d }} 日
+            </option>
+          </select>
         </div>
         <button
           type="submit"
-          :disabled="savingBankBalance"
+          :disabled="savingMonthCloseDay"
           class="rounded-md bg-indigo-600 hover:bg-indigo-700 disabled:opacity-60 text-white px-4 py-2 text-sm font-medium"
-        >{{ savingBankBalance ? '保存中…' : '保存' }}</button>
+        >{{ savingMonthCloseDay ? '保存中…' : '保存' }}</button>
       </form>
+      <p class="text-xs text-slate-400 mt-3">
+        現在の期間: {{ formatDate(finance.periodStart) }} 〜 {{ formatDate(finance.periodEnd) }}
+      </p>
     </section>
 
     <!-- 貯金目標 -->
     <section class="rounded-2xl bg-white border border-slate-200 p-6">
-      <h2 class="font-semibold text-slate-800 mb-4">貯金目標</h2>
+      <div class="flex items-center justify-between mb-4">
+        <h2 class="font-semibold text-slate-800">貯金目標</h2>
+        <button
+          v-if="finance.goal"
+          @click="resetGoal"
+          :disabled="deletingGoal"
+          class="text-sm text-rose-600 hover:underline disabled:opacity-60"
+        >{{ deletingGoal ? '削除中…' : '目標をリセット' }}</button>
+      </div>
+      <p class="text-xs text-slate-500 mb-4">
+        貯金目標を設定しなくてもアプリは使えます。目標をリセットすると、月あたりの貯金額は計算に含まれなくなります。
+      </p>
       <form @submit.prevent="submitGoal" class="grid gap-4 md:grid-cols-2">
         <div class="md:col-span-2">
           <label class="block text-xs text-slate-500 mb-1">タイトル</label>
@@ -149,9 +178,9 @@ async function deleteBill(id: string) {
         </div>
         <div class="md:col-span-2 flex items-center justify-between">
           <p class="text-sm text-slate-500">
-            達成まで不足:
+            月あたり必要な貯金:
             <span class="font-semibold text-emerald-600">
-              {{ formatYen(finance.goalRemainingToSave) }}
+              {{ formatYen(finance.monthlySavingContribution) }}
             </span>
           </p>
           <button
