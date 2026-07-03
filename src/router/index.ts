@@ -1,11 +1,13 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import DashboardView from '@/views/DashboardView.vue'
+import LedgerView from '@/views/LedgerView.vue'
 import SettingsView from '@/views/SettingsView.vue'
 import LoginView from '@/views/LoginView.vue'
 import { useAuthStore } from '@/stores/auth'
 
 const routes = [
   { path: '/', name: 'dashboard', component: DashboardView, meta: { requiresAuth: true } },
+  { path: '/ledger', name: 'ledger', component: LedgerView, meta: { requiresAuth: true } },
   { path: '/settings', name: 'settings', component: SettingsView, meta: { requiresAuth: true } },
   { path: '/login', name: 'login', component: LoginView, meta: { guestOnly: true } },
 ]
