@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useFinanceStore } from '@/stores/finance'
 import { formatYen } from '@/lib/format'
 import type { AssetTransactionSource } from '@/lib/types'
+import DateInputModal from '@/components/DateInputModal.vue'
 
 const props = defineProps<{ open: boolean }>()
 const emit = defineEmits<{ close: [] }>()
@@ -240,11 +241,7 @@ async function deleteTx(id: string) {
                   <div v-else class="space-y-2">
                     <div>
                       <label class="block text-xs text-slate-500 mb-1">日付</label>
-                      <input
-                        v-model="txEdits[tx.id]!.occurred_on"
-                        type="date"
-                        class="w-full h-11 rounded-md border border-slate-300 px-3 focus:outline-none focus:ring-1 focus:ring-indigo-400"
-                      />
+                      <DateInputModal v-model="txEdits[tx.id]!.occurred_on" placeholder="日付を選択" />
                     </div>
                     <div>
                       <label class="block text-xs text-slate-500 mb-1">金額（マイナスも可）</label>

@@ -2,10 +2,12 @@
 import { onMounted, ref, watch } from 'vue'
 import { useFinanceStore } from '@/stores/finance'
 import { formatYen } from '@/lib/format'
+import DateInputModal from '@/components/DateInputModal.vue'
 
 const finance = useFinanceStore()
 
 const monthCloseDayInput = ref<number>(25)
+const incomeInput = ref<number | null>(null)
 const goalTitle = ref('貯金目標')
 const goalAmount = ref<number | null>(null)
 const goalDate = ref<string>('')
@@ -13,6 +15,7 @@ const billName = ref('')
 const billAmount = ref<number | null>(null)
 
 const savingMonthCloseDay = ref(false)
+const savingIncome = ref(false)
 const savingGoal = ref(false)
 const savingBill = ref(false)
 const deletingGoal = ref(false)
@@ -25,6 +28,7 @@ function formatDate(d: Date): string {
 
 function syncFromStore() {
   monthCloseDayInput.value = finance.monthCloseDay || 25
+  incomeInput.value = finance.expectedMonthlyIncome || null
   if (finance.goal) {
     goalTitle.value = finance.goal.title
     goalAmount.value = Number(finance.goal.target_amount)
@@ -49,6 +53,14 @@ async function submitMonthCloseDay() {
   savingMonthCloseDay.value = true
   await finance.saveMonthCloseDay(Number(monthCloseDayInput.value))
   savingMonthCloseDay.value = false
+}
+
+async function submitIncome() {
+  if (incomeInput.value === null || incomeInput.value < 0) return
+  if (!Number.isInteger(incomeInput.value)) return
+  savingIncome.value = true
+  await finance.saveExpectedMonthlyIncome(Math.floor(Number(incomeInput.value)))
+  savingIncome.value = false
 }
 
 async function submitGoal() {
@@ -130,6 +142,43 @@ async function resetGoal() {
       </p>
     </section>
 
+    <!-- 月々の入金見込み -->
+    <section class="rounded-2xl bg-white border border-slate-200 p-6">
+      <h2 class="font-semibold text-slate-800 mb-1">月々の入金見込み</h2>
+      <p class="text-xs text-slate-500 mb-4">
+        給料などで毎月だいたい入ってくるお金の見込み額です。<br />
+        設定すると、ダッシュボードの「今後3ヶ月の予算予測」で、来月以降の予算を月々の入金を基準に計算します。<br />
+        設定しなくてもアプリは動きますが、その場合は総資産をベースにした粗い予測になります。
+      </p>
+      <form @submit.prevent="submitIncome" class="flex gap-3 items-end">
+        <div class="flex-1 max-w-[240px]">
+          <label class="block text-xs text-slate-500 mb-1">月間の見込み金額</label>
+          <div class="relative">
+            <span class="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">¥</span>
+            <input
+              v-model.number="incomeInput"
+              type="number"
+              min="0"
+              step="1"
+              placeholder="例: 250000"
+              class="w-full h-11 rounded-md border border-slate-300 pl-8 pr-3 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+            />
+          </div>
+        </div>
+        <button
+          type="submit"
+          :disabled="savingIncome"
+          class="h-11 rounded-md bg-indigo-600 hover:bg-indigo-700 disabled:opacity-60 text-white px-4 text-sm font-medium"
+        >{{ savingIncome ? '保存中…' : '保存' }}</button>
+      </form>
+      <p v-if="finance.expectedMonthlyIncome > 0" class="text-xs text-slate-400 mt-3">
+        現在の設定: {{ formatYen(finance.expectedMonthlyIncome) }} / 月
+      </p>
+      <p v-else class="text-xs text-amber-600 mt-3">
+        未設定です。予算予測が「総資産ベース」で近似されます。
+      </p>
+    </section>
+
     <!-- 貯金目標 -->
     <section class="rounded-2xl bg-white border border-slate-200 p-6">
       <div class="flex items-center justify-between mb-4">
@@ -170,11 +219,7 @@ async function resetGoal() {
         </div>
         <div>
           <label class="block text-xs text-slate-500 mb-1">達成予定日</label>
-          <input
-            v-model="goalDate"
-            type="date"
-            class="w-full rounded-md border border-slate-300 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-          />
+          <DateInputModal v-model="goalDate" placeholder="日付を選択" />
         </div>
         <div class="md:col-span-2 flex items-center justify-between">
           <p class="text-sm text-slate-500">
@@ -241,5 +286,6 @@ async function resetGoal() {
         >追加</button>
       </form>
     </section>
+
   </div>
 </template>
