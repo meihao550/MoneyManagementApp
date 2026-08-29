@@ -27,7 +27,9 @@ async function handleSignOut() {
 const links = [
   { to: '/', label: 'ダッシュボード', icon: '' },
   { to: '/ledger', label: '家計簿', icon: '' },
+  { to: '/records', label: '家計簿記録', icon: '' },
   { to: '/settings', label: '設定', icon: '' },
+  { to: '/how-to', label: '使い方', icon: '' },
 ]
 </script>
 

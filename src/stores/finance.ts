@@ -357,34 +357,23 @@ export const useFinanceStore = defineStore('finance', () => {
       Math.floor((end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24)) + 1,
       1,
     )
-    const scheduled = totalScheduledInRange(start, end, null, extraPayment)
+    let scheduled = totalScheduledInRange(start, end, null, extraPayment)
+    // 今期 (offset=0) は完了済みを差し引く（総資産から支払われるため計算に含めない）
+    if (offset === 0) {
+      scheduled -= totalScheduledPaidInPeriod.value
+      if (scheduled < 0) scheduled = 0
+    }
     const bills = totalMonthlyBills.value
-    // 貯金予測: 目標残額から均等割り
+    // 貯金予測: 月あたりの貯金額 (monthlySavingContribution) を各期間で一定に想定
+    // ただし累積の貯金額が目標残額を超えたら、その期間の貯金は 0（達成済み）
+    // これで「今期 70,000、来期 70,000、2ヶ月後 0」のような自然な予測になる
     let saving = 0
-    if (goal.value) {
-      const closeDay = monthCloseDay.value
-      const startStr = formatDate(start)
-      const parts = goal.value.target_date.split('-').map(Number)
-      const goalYear = parts[0]!
-      const goalMonth = parts[1]! - 1
-      const goalDay = parts[2]!
-      const goalDate = safeDay(goalYear, goalMonth, goalDay)
-      const goalStr = formatDate(goalDate)
-      let count = 0
-      let y = start.getFullYear()
-      let m = start.getMonth()
-      while (true) {
-        const closeDate = safeDay(y, m, closeDay)
-        const closeStr = formatDate(closeDate)
-        if (closeStr > goalStr) break
-        if (closeStr >= startStr) count++
-        m++
-        if (m > 11) { m = 0; y++ }
-        if (y - start.getFullYear() > 100) break
-      }
-      if (count > 0 && remainingToSave.value > 0) {
-        saving = Math.ceil(remainingToSave.value / Math.max(count, 1))
-      }
+    if (goal.value && monthlySavingContribution.value > 0 && remainingToSave.value > 0) {
+      const monthly = monthlySavingContribution.value
+      // 前の offset で既に貯金してるはずの累計
+      const cumulativeSavedByStart = monthly * offset
+      const remainingAtStart = Math.max(remainingToSave.value - cumulativeSavedByStart, 0)
+      saving = Math.min(monthly, remainingAtStart)
     }
 
     // ベース額の決定:
@@ -473,12 +462,27 @@ export const useFinanceStore = defineStore('finance', () => {
     return items.sort((a, b) => (a.date < b.date ? -1 : 1))
   })
 
-  // 期間内の支払い合計（未完了/完了問わず、budget から差し引かれる）
+  // 期間内の支払い合計（表示用: 完了・未完了問わず）
   const totalScheduledInPeriod = computed(() =>
     scheduledPaymentsInPeriod.value.reduce(
       (sum, item) => sum + Number(item.payment.amount),
       0,
     ),
+  )
+
+  // 未完了の支払い合計（budget 計算用）
+  // 完了済みは総資産から支払われるため、二重計上を避けて計算からは除外する
+  const totalScheduledUnpaidInPeriod = computed(() =>
+    scheduledPaymentsInPeriod.value
+      .filter((item) => !item.completed)
+      .reduce((sum, item) => sum + Number(item.payment.amount), 0),
+  )
+
+  // 完了済みの支払い合計（表示用）
+  const totalScheduledPaidInPeriod = computed(() =>
+    scheduledPaymentsInPeriod.value
+      .filter((item) => item.completed)
+      .reduce((sum, item) => sum + Number(item.payment.amount), 0),
   )
 
   // 今日が支払い日のもの
@@ -508,13 +512,14 @@ export const useFinanceStore = defineStore('finance', () => {
 
   // 今の期間で使える予算（表示用: 今日の支出も差し引いた「残り」）
   // 収入は「現在の総資産」に反映されるので二重計上を避ける
-  // スケジュール支払いは budget から差し引く（支払い当日はここから引かれた形で日割りされる）
-  // = 総資産 − 今月分の貯金 − 今月の固定費 − スケジュール支払い − 期間の支出
+  // スケジュール支払いは「未完了分だけ」を差し引く。
+  // 完了済みは総資産から支払われるため、計算に含めると二重計上になる。
+  // = 総資産 − 今月分の貯金 − 今月の固定費 − 未完了の支払い − 期間の支出
   const spendableThisPeriod = computed(() =>
     totalAssets.value
       - monthlySavingContribution.value
       - totalMonthlyBills.value
-      - totalScheduledInPeriod.value
+      - totalScheduledUnpaidInPeriod.value
       - totalSpentThisPeriod.value,
   )
 
@@ -524,7 +529,7 @@ export const useFinanceStore = defineStore('finance', () => {
     totalAssets.value
       - monthlySavingContribution.value
       - totalMonthlyBills.value
-      - totalScheduledInPeriod.value
+      - totalScheduledUnpaidInPeriod.value
       - totalSpentBeforeToday.value,
   )
 
@@ -1301,6 +1306,8 @@ export const useFinanceStore = defineStore('finance', () => {
     transactionsForAsset,
     scheduledPaymentsInPeriod,
     totalScheduledInPeriod,
+    totalScheduledUnpaidInPeriod,
+    totalScheduledPaidInPeriod,
     paymentsToday,
     paymentsTodayTotal,
     overduePayments,

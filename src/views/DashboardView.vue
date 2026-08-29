@@ -15,11 +15,6 @@ function todayLocalStr(): string {
   return `${t.getFullYear()}-${pad(t.getMonth() + 1)}-${pad(t.getDate())}`
 }
 
-const assetName = ref('')
-const assetAmount = ref<number | null>(null)
-const assetDate = ref<string>(todayLocalStr())
-const addingAsset = ref(false)
-
 const breakdownOpen = ref(false)
 const depositOpen = ref(false)
 
@@ -79,40 +74,6 @@ const selectedDateIncome = computed(() =>
 onMounted(() => {
   finance.fetchAll()
 })
-
-async function submitAsset() {
-  if (!assetName.value.trim() || assetAmount.value === null || assetAmount.value < 0) return
-  addingAsset.value = true
-  await finance.addAsset({
-    name: assetName.value.trim(),
-    amount: Number(assetAmount.value),
-    source: 'dashboard',
-    occurred_on: assetDate.value,
-  })
-  assetName.value = ''
-  assetAmount.value = null
-  assetDate.value = todayLocalStr()
-  addingAsset.value = false
-}
-
-async function handleAssetNameChange(id: string, event: Event) {
-  const target = event.target as HTMLInputElement
-  const value = target.value.trim()
-  if (!value) return
-  await finance.renameAsset(id, value)
-}
-
-async function handleAssetAmountChange(id: string, event: Event) {
-  const target = event.target as HTMLInputElement
-  const value = Number(target.value)
-  if (!Number.isFinite(value) || value < 0) return
-  await finance.setAssetTotal(id, value)
-}
-
-async function deleteAsset(id: string) {
-  if (!confirm('この資産を削除しますか？')) return
-  await finance.removeAsset(id)
-}
 
 async function resetGoal() {
   if (!confirm('貯金目標を削除します。よろしいですか？')) return
@@ -212,7 +173,10 @@ async function undoPaymentComplete(completionId: string | null) {
           </RouterLink>
         </div>
         <p class="text-xs text-slate-500 mb-3">
-          合計 {{ formatYen(finance.totalScheduledInPeriod) }}（既に「使える予算」から差し引き済み）
+          未完了 {{ formatYen(finance.totalScheduledUnpaidInPeriod) }} が「使える予算」から差し引かれます
+          <span v-if="finance.totalScheduledPaidInPeriod > 0" class="text-emerald-600">
+            · 完了済み {{ formatYen(finance.totalScheduledPaidInPeriod) }} は総資産から支払われるため計算外
+          </span>
         </p>
         <ul class="divide-y divide-slate-100 text-sm">
           <li
@@ -248,13 +212,15 @@ async function undoPaymentComplete(completionId: string | null) {
         </ul>
       </div>
 
-      <!-- 総資産（項目管理） -->
+      <!-- 総資産サマリ -->
       <div class="rounded-2xl bg-white border border-slate-200 p-6">
-        <div class="flex items-center justify-between mb-4">
+        <div class="flex items-center justify-between">
           <div>
             <h2 class="font-semibold text-slate-800">現在の総資産</h2>
             <p class="text-xs text-slate-500 mt-1">
-              銀行預金・現金・その他の口座を項目ごとに登録します
+              追加・編集は
+              <RouterLink to="/ledger" class="text-indigo-600 hover:underline">家計簿の「資産管理」タブ</RouterLink>
+              から
             </p>
           </div>
           <div class="flex items-center gap-3">
@@ -271,76 +237,21 @@ async function undoPaymentComplete(completionId: string | null) {
           </div>
         </div>
 
-        <ul v-if="finance.assets.length" class="divide-y divide-slate-100 text-sm mb-4">
+        <ul v-if="finance.assets.length" class="mt-4 divide-y divide-slate-100 text-sm">
           <li
             v-for="asset in finance.assets"
             :key="asset.id"
-            class="grid grid-cols-[1fr_160px_auto] gap-3 items-center py-2"
+            class="flex items-center justify-between py-2"
           >
-            <input
-              type="text"
-              :value="asset.name"
-              @change="(e) => handleAssetNameChange(asset.id, e)"
-              class="rounded-md border border-slate-200 px-3 py-1.5 focus:outline-none focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400"
-            />
-            <div class="relative">
-              <span class="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">¥</span>
-              <input
-                type="number"
-                min="0"
-                step="1000"
-                :value="Number(asset.amount)"
-                @change="(e) => handleAssetAmountChange(asset.id, e)"
-                class="w-full rounded-md border border-slate-200 pl-8 pr-3 py-1.5 text-right focus:outline-none focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400"
-              />
-            </div>
-            <button
-              @click="deleteAsset(asset.id)"
-              class="text-xs text-rose-600 hover:underline"
-            >削除</button>
+            <span class="text-slate-700">{{ asset.name }}</span>
+            <span class="text-slate-800 font-medium">{{ formatYen(Number(asset.amount)) }}</span>
           </li>
         </ul>
-        <p v-else class="text-sm text-slate-500 mb-4">
-          資産項目がまだありません。「銀行預金」「財布の現金」などを追加してください。
+        <p v-else class="mt-4 text-sm text-slate-500">
+          資産項目がまだありません。
+          <RouterLink to="/ledger" class="text-indigo-600 hover:underline">家計簿の「資産管理」タブ</RouterLink>
+          から追加してください。
         </p>
-
-        <form
-          @submit.prevent="submitAsset"
-          class="grid grid-cols-1 md:grid-cols-[1fr_160px_160px_auto] gap-3 items-end"
-        >
-          <div>
-            <label class="block text-xs text-slate-500 mb-1">項目名</label>
-            <input
-              v-model="assetName"
-              type="text"
-              placeholder="銀行預金・財布 など"
-              class="w-full rounded-md border border-slate-300 px-3 py-3 md:py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-            />
-          </div>
-          <div>
-            <label class="block text-xs text-slate-500 mb-1">金額</label>
-            <div class="relative">
-              <span class="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">¥</span>
-              <input
-                v-model.number="assetAmount"
-                type="number"
-                min="0"
-                step="1000"
-                placeholder="100000"
-                class="w-full rounded-md border border-slate-300 pl-8 pr-3 py-3 md:py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-              />
-            </div>
-          </div>
-          <div>
-            <label class="block text-xs text-slate-500 mb-1">日付</label>
-            <DateInputModal v-model="assetDate" placeholder="日付を選択" />
-          </div>
-          <button
-            type="submit"
-            :disabled="addingAsset"
-            class="rounded-md bg-indigo-600 hover:bg-indigo-700 disabled:opacity-60 text-white px-4 py-3 md:py-2 text-sm font-medium"
-          >{{ addingAsset ? '追加中…' : '追加' }}</button>
-        </form>
       </div>
 
       <!-- メインの3枚（期間ベース） -->
@@ -537,17 +448,31 @@ async function undoPaymentComplete(completionId: string | null) {
               </dd>
             </div>
             <div
-              v-if="finance.totalScheduledInPeriod > 0"
+              v-if="finance.totalScheduledUnpaidInPeriod > 0"
               class="flex justify-between py-2"
             >
               <dt class="text-slate-500">
-                この期間のスケジュール支払い
+                未完了の支払い予定
                 <span class="block text-xs text-slate-400">
-                  {{ finance.scheduledPaymentsInPeriod.length }}件
+                  {{ finance.scheduledPaymentsInPeriod.filter(i => !i.completed).length }}件
                 </span>
               </dt>
               <dd class="font-medium text-rose-600">
-                − {{ formatYen(finance.totalScheduledInPeriod) }}
+                − {{ formatYen(finance.totalScheduledUnpaidInPeriod) }}
+              </dd>
+            </div>
+            <div
+              v-if="finance.totalScheduledPaidInPeriod > 0"
+              class="flex justify-between py-2"
+            >
+              <dt class="text-slate-500">
+                完了済みの支払い
+                <span class="block text-xs text-slate-400">
+                  総資産から支払われるため計算に含みません
+                </span>
+              </dt>
+              <dd class="font-medium text-emerald-600">
+                済 {{ formatYen(finance.totalScheduledPaidInPeriod) }}
               </dd>
             </div>
             <div class="flex justify-between py-2">
