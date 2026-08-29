@@ -4,15 +4,32 @@ import { RouterLink } from 'vue-router'
 import { useFinanceStore } from '@/stores/finance'
 import { formatYen } from '@/lib/format'
 import AssetsBreakdownModal from '@/components/AssetsBreakdownModal.vue'
+import DateInputModal from '@/components/DateInputModal.vue'
+import SavingsDepositModal from '@/components/SavingsDepositModal.vue'
 
 const finance = useFinanceStore()
 
-const assetName = ref('')
-const assetAmount = ref<number | null>(null)
-const assetDate = ref<string>(new Date().toISOString().slice(0, 10))
-const addingAsset = ref(false)
+function todayLocalStr(): string {
+  const t = new Date()
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${t.getFullYear()}-${pad(t.getMonth() + 1)}-${pad(t.getDate())}`
+}
 
 const breakdownOpen = ref(false)
+const depositOpen = ref(false)
+
+// 3ヶ月予算予測
+const forecast3Months = computed(() => {
+  return [0, 1, 2].map((offset) => ({
+    offset,
+    label: offset === 0 ? '今期' : `${offset}ヶ月後`,
+    data: finance.forecastForPeriod(offset),
+  }))
+})
+
+function fmtRange(d: Date): string {
+  return d.toLocaleDateString('ja-JP', { month: 'numeric', day: 'numeric' })
+}
 
 const periodLabel = computed(() => {
   const fmt = (d: Date) => d.toLocaleDateString('ja-JP', { month: 'long', day: 'numeric' })
@@ -20,12 +37,13 @@ const periodLabel = computed(() => {
 })
 
 // 日付スライダー
-const selectedDate = ref(new Date().toISOString().slice(0, 10))
+const selectedDate = ref(todayLocalStr())
 
 function shiftDate(days: number) {
-  const d = new Date(selectedDate.value)
-  d.setDate(d.getDate() + days)
-  selectedDate.value = d.toISOString().slice(0, 10)
+  const parts = selectedDate.value.split('-').map(Number)
+  const d = new Date(parts[0]!, parts[1]! - 1, parts[2]! + days)
+  const pad = (n: number) => String(n).padStart(2, '0')
+  selectedDate.value = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
 }
 
 const selectedDateLabel = computed(() =>
@@ -57,43 +75,18 @@ onMounted(() => {
   finance.fetchAll()
 })
 
-async function submitAsset() {
-  if (!assetName.value.trim() || assetAmount.value === null || assetAmount.value < 0) return
-  addingAsset.value = true
-  await finance.addAsset({
-    name: assetName.value.trim(),
-    amount: Number(assetAmount.value),
-    source: 'dashboard',
-    occurred_on: assetDate.value,
-  })
-  assetName.value = ''
-  assetAmount.value = null
-  assetDate.value = new Date().toISOString().slice(0, 10)
-  addingAsset.value = false
-}
-
-async function handleAssetNameChange(id: string, event: Event) {
-  const target = event.target as HTMLInputElement
-  const value = target.value.trim()
-  if (!value) return
-  await finance.renameAsset(id, value)
-}
-
-async function handleAssetAmountChange(id: string, event: Event) {
-  const target = event.target as HTMLInputElement
-  const value = Number(target.value)
-  if (!Number.isFinite(value) || value < 0) return
-  await finance.setAssetTotal(id, value)
-}
-
-async function deleteAsset(id: string) {
-  if (!confirm('この資産を削除しますか？')) return
-  await finance.removeAsset(id)
-}
-
 async function resetGoal() {
   if (!confirm('貯金目標を削除します。よろしいですか？')) return
   await finance.deleteGoal()
+}
+
+async function markPaymentComplete(paymentId: string, dueDate: string) {
+  await finance.completeScheduledPayment(paymentId, dueDate)
+}
+
+async function undoPaymentComplete(completionId: string | null) {
+  if (!completionId) return
+  await finance.uncompleteScheduledPayment(completionId)
 }
 </script>
 
@@ -125,13 +118,109 @@ async function resetGoal() {
     </div>
 
     <div class="space-y-8">
-      <!-- 総資産（項目管理） -->
+      <!-- 支払い通知 -->
+      <div
+        v-if="finance.paymentsNeedingAttention.length"
+        class="rounded-2xl bg-amber-50 border-2 border-amber-300 p-5"
+      >
+        <div class="flex items-start justify-between mb-3">
+          <div>
+            <h2 class="font-bold text-amber-900 text-lg">支払いの確認</h2>
+            <p class="text-xs text-amber-800 mt-1">
+              下記の支払いは完了していますか？ 完了したら「完了」を押してください
+            </p>
+          </div>
+        </div>
+        <ul class="space-y-2">
+          <li
+            v-for="item in finance.paymentsNeedingAttention"
+            :key="item.payment.id + item.date"
+            class="bg-white rounded-lg p-3 flex items-center justify-between gap-3"
+          >
+            <div class="flex-1 min-w-0">
+              <div class="flex items-center gap-2 flex-wrap">
+                <span class="font-semibold text-slate-800">{{ item.payment.name }}</span>
+                <span
+                  v-if="item.date < todayLocalStr()"
+                  class="px-2 py-0.5 rounded-full text-xs font-medium bg-rose-100 text-rose-700"
+                >期限切れ</span>
+                <span
+                  v-else
+                  class="px-2 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-800"
+                >今日</span>
+              </div>
+              <p class="text-sm text-slate-600 mt-0.5">
+                {{ item.date }}: {{ formatYen(Number(item.payment.amount)) }}
+              </p>
+            </div>
+            <button
+              @click="markPaymentComplete(item.payment.id, item.date)"
+              class="h-10 px-4 rounded-md bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-medium shrink-0"
+            >完了</button>
+          </li>
+        </ul>
+      </div>
+
+      <!-- 今後の支払い予定（今日以外） -->
+      <div
+        v-if="finance.upcomingPayments.length || finance.scheduledPaymentsInPeriod.some(i => i.completed)"
+        class="rounded-2xl bg-white border border-slate-200 p-6"
+      >
+        <div class="flex items-center justify-between mb-3">
+          <h2 class="font-semibold text-slate-800">この期間の支払い予定</h2>
+          <RouterLink to="/ledger" class="text-xs text-indigo-600 hover:underline">
+            登録・編集
+          </RouterLink>
+        </div>
+        <p class="text-xs text-slate-500 mb-3">
+          未完了 {{ formatYen(finance.totalScheduledUnpaidInPeriod) }} が「使える予算」から差し引かれます
+          <span v-if="finance.totalScheduledPaidInPeriod > 0" class="text-emerald-600">
+            · 完了済み {{ formatYen(finance.totalScheduledPaidInPeriod) }} は総資産から支払われるため計算外
+          </span>
+        </p>
+        <ul class="divide-y divide-slate-100 text-sm">
+          <li
+            v-for="item in finance.scheduledPaymentsInPeriod"
+            :key="item.payment.id + item.date"
+            class="py-2 flex items-center justify-between gap-3"
+          >
+            <div class="flex-1 min-w-0">
+              <div class="flex items-center gap-2 flex-wrap">
+                <span
+                  class="inline-block w-1.5 h-1.5 rounded-full"
+                  :class="item.completed ? 'bg-emerald-500' : 'bg-slate-300'"
+                />
+                <span
+                  class="text-slate-700"
+                  :class="item.completed ? 'line-through text-slate-400' : ''"
+                >{{ item.payment.name }}</span>
+                <span class="text-xs text-slate-400">{{ item.date }}</span>
+              </div>
+            </div>
+            <div class="flex items-center gap-3 shrink-0">
+              <span
+                class="font-medium"
+                :class="item.completed ? 'text-slate-400 line-through' : 'text-slate-700'"
+              >{{ formatYen(Number(item.payment.amount)) }}</span>
+              <button
+                v-if="item.completed"
+                @click="undoPaymentComplete(item.completionId)"
+                class="text-xs text-slate-500 hover:underline"
+              >取消</button>
+            </div>
+          </li>
+        </ul>
+      </div>
+
+      <!-- 総資産サマリ -->
       <div class="rounded-2xl bg-white border border-slate-200 p-6">
-        <div class="flex items-center justify-between mb-4">
+        <div class="flex items-center justify-between">
           <div>
             <h2 class="font-semibold text-slate-800">現在の総資産</h2>
             <p class="text-xs text-slate-500 mt-1">
-              銀行預金・現金・その他の口座を項目ごとに登録します
+              追加・編集は
+              <RouterLink to="/ledger" class="text-indigo-600 hover:underline">家計簿の「資産管理」タブ</RouterLink>
+              から
             </p>
           </div>
           <div class="flex items-center gap-3">
@@ -148,80 +237,21 @@ async function resetGoal() {
           </div>
         </div>
 
-        <ul v-if="finance.assets.length" class="divide-y divide-slate-100 text-sm mb-4">
+        <ul v-if="finance.assets.length" class="mt-4 divide-y divide-slate-100 text-sm">
           <li
             v-for="asset in finance.assets"
             :key="asset.id"
-            class="grid grid-cols-[1fr_160px_auto] gap-3 items-center py-2"
+            class="flex items-center justify-between py-2"
           >
-            <input
-              type="text"
-              :value="asset.name"
-              @change="(e) => handleAssetNameChange(asset.id, e)"
-              class="rounded-md border border-slate-200 px-3 py-1.5 focus:outline-none focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400"
-            />
-            <div class="relative">
-              <span class="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">¥</span>
-              <input
-                type="number"
-                min="0"
-                step="1000"
-                :value="Number(asset.amount)"
-                @change="(e) => handleAssetAmountChange(asset.id, e)"
-                class="w-full rounded-md border border-slate-200 pl-8 pr-3 py-1.5 text-right focus:outline-none focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400"
-              />
-            </div>
-            <button
-              @click="deleteAsset(asset.id)"
-              class="text-xs text-rose-600 hover:underline"
-            >削除</button>
+            <span class="text-slate-700">{{ asset.name }}</span>
+            <span class="text-slate-800 font-medium">{{ formatYen(Number(asset.amount)) }}</span>
           </li>
         </ul>
-        <p v-else class="text-sm text-slate-500 mb-4">
-          資産項目がまだありません。「銀行預金」「財布の現金」などを追加してください。
+        <p v-else class="mt-4 text-sm text-slate-500">
+          資産項目がまだありません。
+          <RouterLink to="/ledger" class="text-indigo-600 hover:underline">家計簿の「資産管理」タブ</RouterLink>
+          から追加してください。
         </p>
-
-        <form
-          @submit.prevent="submitAsset"
-          class="grid grid-cols-1 md:grid-cols-[1fr_160px_160px_auto] gap-3 items-end"
-        >
-          <div>
-            <label class="block text-xs text-slate-500 mb-1">項目名</label>
-            <input
-              v-model="assetName"
-              type="text"
-              placeholder="銀行預金・財布 など"
-              class="w-full rounded-md border border-slate-300 px-3 py-3 md:py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-            />
-          </div>
-          <div>
-            <label class="block text-xs text-slate-500 mb-1">金額</label>
-            <div class="relative">
-              <span class="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">¥</span>
-              <input
-                v-model.number="assetAmount"
-                type="number"
-                min="0"
-                step="1000"
-                placeholder="100000"
-                class="w-full rounded-md border border-slate-300 pl-8 pr-3 py-3 md:py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-              />
-            </div>
-          </div>
-          <div>
-            <label class="block text-xs text-slate-500 mb-1">日付</label>
-            <input
-              v-model="assetDate"
-              type="date"
-              class="w-full rounded-md border border-slate-300 px-3 py-3 md:py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-            />
-          </div>
-          <button
-            type="submit"
-            :disabled="addingAsset"
-            class="rounded-md bg-indigo-600 hover:bg-indigo-700 disabled:opacity-60 text-white px-4 py-3 md:py-2 text-sm font-medium"
-          >{{ addingAsset ? '追加中…' : '追加' }}</button>
-        </form>
       </div>
 
       <!-- メインの3枚（期間ベース） -->
@@ -289,6 +319,33 @@ async function resetGoal() {
             </p>
           </div>
         </div>
+        <div
+          v-if="finance.paymentsToday.length"
+          class="mt-4 pt-3 border-t border-slate-100"
+        >
+          <p class="text-xs text-slate-500 mb-1">
+            今日は別途スケジュール支払いがあります（今日の残りとは別枠）
+          </p>
+          <ul class="text-sm space-y-1">
+            <li
+              v-for="item in finance.paymentsToday"
+              :key="item.payment.id + item.date"
+              class="flex items-center justify-between"
+            >
+              <span
+                :class="item.completed ? 'text-slate-400 line-through' : 'text-slate-700'"
+              >{{ item.payment.name }}</span>
+              <span
+                class="font-medium"
+                :class="item.completed ? 'text-slate-400 line-through' : 'text-amber-700'"
+              >{{ formatYen(Number(item.payment.amount)) }}</span>
+            </li>
+          </ul>
+          <p class="text-xs text-slate-500 mt-1">
+            今日の支払い合計:
+            <span class="font-semibold">{{ formatYen(finance.paymentsTodayTotal) }}</span>
+          </p>
+        </div>
       </div>
 
       <!-- 日付スライダー付き 履歴 -->
@@ -308,11 +365,7 @@ async function resetGoal() {
             aria-label="前の日"
           >←</button>
           <div class="flex-1 text-center">
-            <input
-              v-model="selectedDate"
-              type="date"
-              class="text-sm text-center bg-transparent focus:outline-none"
-            />
+            <DateInputModal v-model="selectedDate" placeholder="日付を選択" />
             <p class="text-xs text-slate-400 mt-1">{{ selectedDateLabel }}</p>
           </div>
           <button
@@ -394,6 +447,34 @@ async function resetGoal() {
                 − {{ formatYen(finance.totalMonthlyBills) }}
               </dd>
             </div>
+            <div
+              v-if="finance.totalScheduledUnpaidInPeriod > 0"
+              class="flex justify-between py-2"
+            >
+              <dt class="text-slate-500">
+                未完了の支払い予定
+                <span class="block text-xs text-slate-400">
+                  {{ finance.scheduledPaymentsInPeriod.filter(i => !i.completed).length }}件
+                </span>
+              </dt>
+              <dd class="font-medium text-rose-600">
+                − {{ formatYen(finance.totalScheduledUnpaidInPeriod) }}
+              </dd>
+            </div>
+            <div
+              v-if="finance.totalScheduledPaidInPeriod > 0"
+              class="flex justify-between py-2"
+            >
+              <dt class="text-slate-500">
+                完了済みの支払い
+                <span class="block text-xs text-slate-400">
+                  総資産から支払われるため計算に含みません
+                </span>
+              </dt>
+              <dd class="font-medium text-emerald-600">
+                済 {{ formatYen(finance.totalScheduledPaidInPeriod) }}
+              </dd>
+            </div>
             <div class="flex justify-between py-2">
               <dt class="text-slate-500">この期間の支出（記録済み）</dt>
               <dd class="font-medium text-rose-600">
@@ -425,10 +506,25 @@ async function resetGoal() {
             <p class="text-slate-500">タイトル</p>
             <p class="font-medium text-slate-800">{{ finance.goal.title }}</p>
 
-            <p class="text-slate-500 mt-3">目標金額</p>
-            <p class="font-medium text-slate-800">
-              {{ formatYen(finance.goalTargetAmount) }}
-            </p>
+            <!-- 達成バー -->
+            <div class="mt-3">
+              <div class="flex items-center justify-between mb-1">
+                <span class="text-slate-500">達成状況</span>
+                <span class="text-xs font-semibold text-slate-700">
+                  {{ Math.floor(finance.goalProgress * 100) }}%
+                </span>
+              </div>
+              <div class="h-3 rounded-full bg-slate-100 overflow-hidden">
+                <div
+                  class="h-full transition-all"
+                  :class="finance.isGoalAchieved ? 'bg-emerald-500' : 'bg-indigo-500'"
+                  :style="{ width: Math.min(finance.goalProgress * 100, 100) + '%' }"
+                />
+              </div>
+              <p class="text-xs text-slate-500 mt-1">
+                {{ formatYen(finance.totalSavedForGoal) }} / {{ formatYen(finance.goalTargetAmount) }}
+              </p>
+            </div>
 
             <p class="text-slate-500 mt-3">達成予定日</p>
             <p class="font-medium text-slate-800">
@@ -436,14 +532,65 @@ async function resetGoal() {
               <span class="text-xs text-slate-400">（あと {{ finance.monthsToGoal }} 回の月じめ）</span>
             </p>
 
-            <p class="text-slate-500 mt-3">月あたり必要な貯金</p>
-            <p class="font-bold text-emerald-600">
-              {{ formatYen(finance.monthlySavingContribution) }}
-              <span class="text-xs font-normal text-slate-400">/ 月</span>
-            </p>
-            <p class="text-xs text-slate-400">
-              給料が入るタイミングで毎月この金額を積み立てる想定です
-            </p>
+            <template v-if="finance.isGoalAchieved">
+              <p class="mt-3 text-sm font-bold text-emerald-600">
+                🎉 目標達成しました！
+              </p>
+              <p class="text-xs text-slate-400">
+                これ以上の月あたりの貯金は不要です
+              </p>
+            </template>
+            <template v-else>
+              <p class="text-slate-500 mt-3">残り</p>
+              <p class="font-medium text-slate-800">
+                {{ formatYen(finance.remainingToSave) }}
+              </p>
+
+              <p class="text-slate-500 mt-3">今期の月あたり必要な貯金</p>
+              <p class="font-bold text-emerald-600">
+                {{ formatYen(finance.monthlySavingContribution) }}
+                <span class="text-xs font-normal text-slate-400">/ 月</span>
+              </p>
+              <p class="text-xs text-slate-400">
+                残額 ÷ 残り月数 で毎月自動再計算されます
+              </p>
+
+              <!-- 今期の状態と貯金ボタン -->
+              <div
+                class="mt-4 rounded-lg p-3"
+                :class="finance.hasDepositedThisPeriod
+                  ? 'bg-emerald-50 border border-emerald-200'
+                  : finance.shouldRemindDeposit
+                    ? 'bg-amber-50 border-2 border-amber-300'
+                    : 'bg-slate-50 border border-slate-200'"
+              >
+                <template v-if="finance.hasDepositedThisPeriod">
+                  <p class="text-xs text-emerald-700 mb-1">今期は貯金済み ✓</p>
+                  <p class="text-sm font-semibold text-emerald-800">
+                    +{{ formatYen(finance.totalSavedThisPeriod) }}
+                  </p>
+                </template>
+                <template v-else-if="finance.shouldRemindDeposit">
+                  <p class="text-sm font-bold text-amber-900 mb-2">
+                    今期の貯金 {{ formatYen(finance.monthlySavingContribution) }} はまだですか？
+                  </p>
+                  <p class="text-xs text-amber-700 mb-2">
+                    月じめまであと {{ finance.daysLeftInPeriod }} 日
+                  </p>
+                  <button
+                    @click="depositOpen = true"
+                    class="w-full h-10 rounded-md bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-medium"
+                  >貯金を記録する</button>
+                </template>
+                <template v-else>
+                  <p class="text-xs text-slate-500 mb-2">今期の貯金はまだ記録されていません</p>
+                  <button
+                    @click="depositOpen = true"
+                    class="w-full h-10 rounded-md bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-medium"
+                  >貯金を記録する</button>
+                </template>
+              </div>
+            </template>
           </div>
           <div v-else class="text-sm text-slate-500 space-y-2">
             <p>貯金目標は設定されていません。</p>
@@ -458,8 +605,90 @@ async function resetGoal() {
         </div>
       </div>
 
+      <!-- 3ヶ月の予算予測 -->
+      <div class="rounded-2xl bg-white border border-slate-200 p-6">
+        <div class="flex items-center justify-between mb-1">
+          <h2 class="font-semibold text-slate-800">今後3ヶ月の予算予測</h2>
+          <RouterLink
+            v-if="finance.expectedMonthlyIncome === 0"
+            to="/settings"
+            class="text-xs text-indigo-600 hover:underline"
+          >月々の入金を設定</RouterLink>
+        </div>
+        <p class="text-xs text-slate-500 mb-1">
+          今期は現在の総資産、未来の期間は「前期の使える残り」＋「月々の入金見込み」をベースに、時間で繋がった予測をします。急な支払いで来月がきついと事前に気づけます。
+        </p>
+        <p
+          v-if="finance.expectedMonthlyIncome === 0"
+          class="text-xs text-amber-600 mb-4"
+        >
+          ⚠️ 月々の入金見込みが未設定です。未来期の予測は総資産で近似されるため、正確ではありません。
+        </p>
+        <div v-else class="mb-4"></div>
+        <div class="grid gap-3 md:grid-cols-3">
+          <div
+            v-for="row in forecast3Months"
+            :key="row.offset"
+            class="rounded-xl border p-4"
+            :class="row.offset === 0 ? 'border-indigo-300 bg-indigo-50' : 'border-slate-200'"
+          >
+            <div class="flex items-center justify-between mb-2">
+              <span
+                class="text-xs font-semibold"
+                :class="row.offset === 0 ? 'text-indigo-700' : 'text-slate-700'"
+              >{{ row.label }}</span>
+              <span class="text-xs text-slate-500">
+                {{ fmtRange(row.data.start) }} 〜 {{ fmtRange(row.data.end) }}
+              </span>
+            </div>
+            <div class="text-2xl font-bold text-slate-800">
+              {{ formatYen(row.data.daily) }}
+              <span class="text-xs font-normal text-slate-500">/ 日</span>
+            </div>
+            <ul class="mt-3 text-xs text-slate-500 space-y-1">
+              <!-- 今期: 総資産のみ -->
+              <li v-if="row.offset === 0" class="flex justify-between">
+                <span class="truncate">総資産</span>
+                <span>+ {{ formatYen(row.data.base) }}</span>
+              </li>
+              <!-- 未来期: 前期の残り (+ 月々の入金) -->
+              <template v-else>
+                <li class="flex justify-between">
+                  <span class="truncate">{{ row.data.carryoverLabel }}</span>
+                  <span>+ {{ formatYen(row.data.carryover) }}</span>
+                </li>
+                <li v-if="row.data.income > 0" class="flex justify-between">
+                  <span>月々の入金</span>
+                  <span>+ {{ formatYen(row.data.income) }}</span>
+                </li>
+              </template>
+              <li class="flex justify-between">
+                <span>固定費</span>
+                <span>− {{ formatYen(row.data.bills) }}</span>
+              </li>
+              <li class="flex justify-between">
+                <span>支払い予定 ({{ row.data.days }}日)</span>
+                <span>− {{ formatYen(row.data.scheduled) }}</span>
+              </li>
+              <li class="flex justify-between">
+                <span>貯金分</span>
+                <span>− {{ formatYen(row.data.saving) }}</span>
+              </li>
+              <li class="flex justify-between font-semibold text-slate-700 pt-1 border-t border-slate-100">
+                <span>使える予算</span>
+                <span>{{ formatYen(row.data.spendable) }}</span>
+              </li>
+            </ul>
+          </div>
+        </div>
+        <p class="text-xs text-slate-400 mt-3">
+          ※ 予測はあくまで目安です。実際の支出や貯金の記録で自動的に更新されます。
+        </p>
+      </div>
+
     </div>
 
     <AssetsBreakdownModal :open="breakdownOpen" @close="breakdownOpen = false" />
+    <SavingsDepositModal :open="depositOpen" @close="depositOpen = false" />
   </div>
 </template>

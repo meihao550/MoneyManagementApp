@@ -9,7 +9,11 @@ import type {
   Expense,
   MonthlyBill,
   Profile,
+  SavingsDeposit,
   SavingsGoal,
+  ScheduledPayment,
+  ScheduledPaymentCompletion,
+  ScheduledPaymentOccurrence,
 } from '@/lib/types'
 import { useAuthStore } from '@/stores/auth'
 
@@ -88,6 +92,9 @@ export const useFinanceStore = defineStore('finance', () => {
   const expenses = ref<Expense[]>([])
   const assets = ref<Asset[]>([])
   const assetTransactions = ref<AssetTransaction[]>([])
+  const scheduledPayments = ref<ScheduledPayment[]>([])
+  const scheduledCompletions = ref<ScheduledPaymentCompletion[]>([])
+  const savingsDeposits = ref<SavingsDeposit[]>([])
   const loading = ref(false)
   const errorMessage = ref<string | null>(null)
 
@@ -101,6 +108,9 @@ export const useFinanceStore = defineStore('finance', () => {
     assets.value.reduce((sum, a) => sum + Number(a.amount), 0),
   )
   const monthCloseDay = computed(() => Number(profile.value?.month_close_day ?? 25))
+  const expectedMonthlyIncome = computed(() =>
+    Number(profile.value?.expected_monthly_income ?? 0),
+  )
 
   const totalMonthlyBills = computed(() =>
     bills.value.reduce((sum, b) => sum + Number(b.amount), 0),
@@ -129,15 +139,65 @@ export const useFinanceStore = defineStore('finance', () => {
     )
   })
 
-  // 月あたりの貯金額（目標金額 ÷ 締め日回数）
+  // 現在の目標に対して、これまでに貯金した合計額
+  const totalSavedForGoal = computed(() => {
+    if (!goal.value) return 0
+    const gid = goal.value.id
+    return savingsDeposits.value
+      .filter((d) => d.goal_id === gid)
+      .reduce((sum, d) => sum + Number(d.amount), 0)
+  })
+
+  // 目標達成までの残り必要額（既に貯金した分を差し引く）
+  const remainingToSave = computed(() =>
+    Math.max(goalTargetAmount.value - totalSavedForGoal.value, 0),
+  )
+
+  // 目標達成度（0〜1）
+  const goalProgress = computed(() => {
+    if (!goal.value || goalTargetAmount.value <= 0) return 0
+    return Math.min(totalSavedForGoal.value / goalTargetAmount.value, 1)
+  })
+
+  // 目標達成済みか
+  const isGoalAchieved = computed(() =>
+    goal.value ? totalSavedForGoal.value >= goalTargetAmount.value : false,
+  )
+
+  // 月あたりの貯金額（残額 ÷ 残り月数）
+  // 既に貯金できていれば少ない額に、達成済みなら 0 に
   const monthlySavingContribution = computed(() => {
     if (!goal.value || monthsToGoal.value <= 0) return 0
-    return Math.ceil(goalTargetAmount.value / monthsToGoal.value)
+    if (remainingToSave.value <= 0) return 0
+    return Math.ceil(remainingToSave.value / monthsToGoal.value)
   })
 
   // 現在期間の日付範囲
   const periodStartStr = computed(() => formatDate(periodStart.value))
   const periodEndStr = computed(() => formatDate(periodEnd.value))
+
+  // 現在期間で貯金済みか
+  const savingsForCurrentPeriod = computed(() =>
+    goal.value
+      ? savingsDeposits.value.filter(
+          (d) =>
+            d.goal_id === goal.value!.id &&
+            d.period_start === periodStartStr.value,
+        )
+      : [],
+  )
+  const hasDepositedThisPeriod = computed(() => savingsForCurrentPeriod.value.length > 0)
+  const totalSavedThisPeriod = computed(() =>
+    savingsForCurrentPeriod.value.reduce((sum, d) => sum + Number(d.amount), 0),
+  )
+
+  // 「そろそろ貯金の月末通知を出すか」判定 (期間終了まで残り 3 日以内 かつ 未貯金)
+  const shouldRemindDeposit = computed(() => {
+    if (!goal.value) return false
+    if (isGoalAchieved.value) return false
+    if (hasDepositedThisPeriod.value) return false
+    return daysLeftInPeriod.value <= 3
+  })
 
   // 資産に紐付いた家計簿エントリー（IDセット）— 資産減算で反映済みなので重複計上を防ぐ
   const linkedLedgerEntryIds = computed(
@@ -182,21 +242,313 @@ export const useFinanceStore = defineStore('finance', () => {
       .reduce((sum, e) => sum + Number(e.amount), 0)
   })
 
-  // 今の期間で使える予算
+  // 今日より前の支出合計（1日予算を「今日の朝時点」で固定するために使用）
+  const totalSpentBeforeToday = computed(() => {
+    const today = formatDate(new Date())
+    return expenses.value
+      .filter(
+        (e) =>
+          e.kind === 'expense' &&
+          !linkedLedgerEntryIds.value.has(e.id) &&
+          e.spent_on >= periodStartStr.value &&
+          e.spent_on < today,
+      )
+      .reduce((sum, e) => sum + Number(e.amount), 0)
+  })
+
+  // 1つのスケジュール支払いから、指定範囲内のオカレンス（実支払日）を全部返す
+  // 日付は全て YYYY-MM-DD 文字列で比較（タイムゾーンの罠を回避）
+  function occurrencesForPayment(
+    payment: ScheduledPayment,
+    from: Date,
+    to: Date,
+  ): string[] {
+    const fromStr = formatDate(from)
+    const toStr = formatDate(to)
+    const firstStr = payment.due_date
+    const endStr = payment.recurring_end_date ?? '9999-12-31'
+
+    // 単発
+    if (!payment.recurring) {
+      if (firstStr >= fromStr && firstStr <= toStr) {
+        return [firstStr]
+      }
+      return []
+    }
+
+    // 繰り返し: due_date の日を毎月拾う
+    // due_date を「年・月・日」に分解（Date コンストラクタ経由だと UTC 解釈で 1日ずれる可能性あり）
+    const parts = firstStr.split('-').map(Number)
+    const firstYear = parts[0]!
+    const firstMonth = parts[1]! - 1
+    const dayOfMonth = parts[2]!
+
+    const results: string[] = []
+    let year = firstYear
+    let month = firstMonth
+
+    while (true) {
+      const occurrence = safeDay(year, month, dayOfMonth)
+      const occStr = formatDate(occurrence)
+      if (occStr > toStr) break
+      if (occStr >= firstStr && occStr <= endStr && occStr >= fromStr) {
+        results.push(occStr)
+      }
+      month++
+      if (month > 11) {
+        month = 0
+        year++
+      }
+      // 安全策
+      if (year - firstYear > 100) break
+    }
+    return results
+  }
+
+  // 指定した offset ヶ月先の期間 [periodStart, periodEnd] を返す
+  function periodAtOffset(offset: number): { start: Date; end: Date } {
+    const closeDay = monthCloseDay.value
+    const base = periodStart.value
+    const start = safeDay(base.getFullYear(), base.getMonth() + offset, closeDay)
+    const nextStart = safeDay(start.getFullYear(), start.getMonth() + 1, closeDay)
+    const end = new Date(nextStart)
+    end.setDate(end.getDate() - 1)
+    return { start, end }
+  }
+
+  // 指定期間内のスケジュール支払い合計
+  function totalScheduledInRange(
+    from: Date,
+    to: Date,
+    ignorePaymentId: string | null = null,
+    extraPayment: ScheduledPayment | null = null,
+  ): number {
+    let sum = 0
+    const list = extraPayment
+      ? [...scheduledPayments.value, extraPayment]
+      : scheduledPayments.value
+    for (const p of list) {
+      if (ignorePaymentId && p.id === ignorePaymentId) continue
+      const dates = occurrencesForPayment(p, from, to)
+      sum += dates.length * Number(p.amount)
+    }
+    return sum
+  }
+
+  // 指定期間の 1日あたり予算予測（total_assetsは共通、他は期間ごと）
+  // total_assets を各期間の頭で「使いきる」想定の粗い予測。UI に「傾向」を見せるため
+  function forecastForPeriod(offset: number, extraPayment: ScheduledPayment | null = null): {
+    start: Date
+    end: Date
+    days: number
+    base: number
+    baseLabel: string
+    carryover: number
+    carryoverLabel: string
+    income: number
+    bills: number
+    scheduled: number
+    saving: number
+    spendable: number
+    daily: number
+  } {
+    const { start, end } = periodAtOffset(offset)
+    const days = Math.max(
+      Math.floor((end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24)) + 1,
+      1,
+    )
+    let scheduled = totalScheduledInRange(start, end, null, extraPayment)
+    // 今期 (offset=0) は完了済みを差し引く（総資産から支払われるため計算に含めない）
+    if (offset === 0) {
+      scheduled -= totalScheduledPaidInPeriod.value
+      if (scheduled < 0) scheduled = 0
+    }
+    const bills = totalMonthlyBills.value
+    // 貯金予測: 月あたりの貯金額 (monthlySavingContribution) を各期間で一定に想定
+    // ただし累積の貯金額が目標残額を超えたら、その期間の貯金は 0（達成済み）
+    // これで「今期 70,000、来期 70,000、2ヶ月後 0」のような自然な予測になる
+    let saving = 0
+    if (goal.value && monthlySavingContribution.value > 0 && remainingToSave.value > 0) {
+      const monthly = monthlySavingContribution.value
+      // 前の offset で既に貯金してるはずの累計
+      const cumulativeSavedByStart = monthly * offset
+      const remainingAtStart = Math.max(remainingToSave.value - cumulativeSavedByStart, 0)
+      saving = Math.min(monthly, remainingAtStart)
+    }
+
+    // ベース額の決定:
+    // - 今期 (offset=0): 現在の総資産
+    // - 未来期: 前期の使える残り (carryover) + 月々の見込み入金
+    //   月々の入金が未設定なら、carryover だけ（総資産で近似）
+    let base: number
+    let baseLabel: string
+    let carryover = 0
+    let carryoverLabel = ''
+    let income = 0
+    if (offset === 0) {
+      base = totalAssets.value
+      baseLabel = '総資産'
+    } else {
+      // 前期の予測を計算（再帰、offset≤2なので浅い）
+      const previous = forecastForPeriod(offset - 1, extraPayment)
+      carryover = previous.spendable
+      carryoverLabel = offset === 1 ? '今期の残り' : `${offset - 1}ヶ月後の残り`
+      if (expectedMonthlyIncome.value > 0) {
+        income = expectedMonthlyIncome.value
+        base = carryover + income
+        baseLabel = `${carryoverLabel} + 月々の入金`
+      } else {
+        base = carryover
+        baseLabel = `${carryoverLabel}（月々の入金未設定）`
+      }
+    }
+
+    const spendable = Math.max(base - bills - scheduled - saving, 0)
+    const daily = Math.floor(spendable / days)
+    return {
+      start, end, days,
+      base, baseLabel,
+      carryover, carryoverLabel, income,
+      bills, scheduled, saving, spendable, daily,
+    }
+  }
+
+  // 次月 (offset=1) の 1日予算 予測
+  function nextMonthDailyBudget(extraPayment: ScheduledPayment | null = null): number {
+    return forecastForPeriod(1, extraPayment).daily
+  }
+
+  // 繰り返し支払いの「今後の残り回数」（今日以降で終了日まで）
+  function remainingOccurrencesForPayment(payment: ScheduledPayment): number {
+    if (!payment.recurring) return 1
+    const today = formatDate(new Date())
+    const endStr = payment.recurring_end_date ?? '9999-12-31'
+    const parts = payment.due_date.split('-').map(Number)
+    const firstYear = parts[0]!
+    const firstMonth = parts[1]! - 1
+    const dayOfMonth = parts[2]!
+    let year = firstYear
+    let month = firstMonth
+    let count = 0
+    while (true) {
+      const occurrence = safeDay(year, month, dayOfMonth)
+      const occStr = formatDate(occurrence)
+      if (occStr > endStr) break
+      if (occStr >= today && occStr >= payment.due_date) count++
+      month++
+      if (month > 11) { month = 0; year++ }
+      if (year - firstYear > 100) break
+    }
+    return count
+  }
+
+  // 現在の期間内の全支払い予定
+  const scheduledPaymentsInPeriod = computed<ScheduledPaymentOccurrence[]>(() => {
+    const items: ScheduledPaymentOccurrence[] = []
+    for (const p of scheduledPayments.value) {
+      const dates = occurrencesForPayment(p, periodStart.value, periodEnd.value)
+      for (const date of dates) {
+        const completion = scheduledCompletions.value.find(
+          (c) => c.payment_id === p.id && c.due_date === date,
+        )
+        items.push({
+          payment: p,
+          date,
+          completed: !!completion,
+          completionId: completion?.id ?? null,
+        })
+      }
+    }
+    return items.sort((a, b) => (a.date < b.date ? -1 : 1))
+  })
+
+  // 期間内の支払い合計（表示用: 完了・未完了問わず）
+  const totalScheduledInPeriod = computed(() =>
+    scheduledPaymentsInPeriod.value.reduce(
+      (sum, item) => sum + Number(item.payment.amount),
+      0,
+    ),
+  )
+
+  // 未完了の支払い合計（budget 計算用）
+  // 完了済みは総資産から支払われるため、二重計上を避けて計算からは除外する
+  const totalScheduledUnpaidInPeriod = computed(() =>
+    scheduledPaymentsInPeriod.value
+      .filter((item) => !item.completed)
+      .reduce((sum, item) => sum + Number(item.payment.amount), 0),
+  )
+
+  // 完了済みの支払い合計（表示用）
+  const totalScheduledPaidInPeriod = computed(() =>
+    scheduledPaymentsInPeriod.value
+      .filter((item) => item.completed)
+      .reduce((sum, item) => sum + Number(item.payment.amount), 0),
+  )
+
+  // 今日が支払い日のもの
+  const paymentsToday = computed(() => {
+    const today = formatDate(new Date())
+    return scheduledPaymentsInPeriod.value.filter((item) => item.date === today)
+  })
+
+  // 期限切れ（過去日）で未完了のもの
+  const overduePayments = computed(() => {
+    const today = formatDate(new Date())
+    return scheduledPaymentsInPeriod.value.filter(
+      (item) => item.date < today && !item.completed,
+    )
+  })
+
+  // 今後の支払い（未来）
+  const upcomingPayments = computed(() => {
+    const today = formatDate(new Date())
+    return scheduledPaymentsInPeriod.value.filter((item) => item.date > today)
+  })
+
+  // 通知が必要な支払い（今日 + 期限切れ で未完了）
+  const paymentsNeedingAttention = computed(() =>
+    [...paymentsToday.value, ...overduePayments.value].filter((item) => !item.completed),
+  )
+
+  // 今の期間で使える予算（表示用: 今日の支出も差し引いた「残り」）
   // 収入は「現在の総資産」に反映されるので二重計上を避ける
-  // = 総資産 − 今月分の貯金 − 今月の固定費 − 期間の支出
+  // スケジュール支払いは「未完了分だけ」を差し引く。
+  // 完了済みは総資産から支払われるため、計算に含めると二重計上になる。
+  // = 総資産 − 今月分の貯金 − 今月の固定費 − 未完了の支払い − 期間の支出
   const spendableThisPeriod = computed(() =>
     totalAssets.value
       - monthlySavingContribution.value
       - totalMonthlyBills.value
+      - totalScheduledUnpaidInPeriod.value
       - totalSpentThisPeriod.value,
+  )
+
+  // 「今日の朝時点」の残り予算（日割り計算用）
+  // 今日使ったぶんはまだ引かない → 今日1日で 日割り予算 を固定する
+  const spendableAtStartOfToday = computed(() =>
+    totalAssets.value
+      - monthlySavingContribution.value
+      - totalMonthlyBills.value
+      - totalScheduledUnpaidInPeriod.value
+      - totalSpentBeforeToday.value,
+  )
+
+  // 今日支払いがある場合の合計額（表示用）
+  const paymentsTodayTotal = computed(() =>
+    paymentsToday.value.reduce((sum, item) => sum + Number(item.payment.amount), 0),
   )
 
   const isOverBudget = computed(() => spendableThisPeriod.value < 0)
 
+  // 1日に使える額
+  // = (今日の朝時点で残っている予算) ÷ (今日を含む残り日数)
+  // 今日いくら使っても、今日中は同じ値を返す
+  // 翌日になると「昨日までの支出」が反映されるので、
+  //   - 今日使い切ったら翌日は少し下がる
+  //   - 今日節約したら翌日は少し上がる
   const dailySpendable = computed(() =>
     daysLeftInPeriod.value > 0
-      ? Math.floor(spendableThisPeriod.value / daysLeftInPeriod.value)
+      ? Math.floor(spendableAtStartOfToday.value / daysLeftInPeriod.value)
       : 0,
   )
 
@@ -256,7 +608,16 @@ export const useFinanceStore = defineStore('finance', () => {
       if (profileRes.error) throw profileRes.error
       profile.value = profileRes.data as Profile | null
 
-      const [goalRes, billsRes, expensesRes, assetsRes, assetTxRes] = await Promise.all([
+      const [
+        goalRes,
+        billsRes,
+        expensesRes,
+        assetsRes,
+        assetTxRes,
+        schedRes,
+        schedComplRes,
+        savingsRes,
+      ] = await Promise.all([
         supabase
           .from('savings_goals')
           .select('*')
@@ -286,6 +647,21 @@ export const useFinanceStore = defineStore('finance', () => {
           .eq('user_id', uid)
           .order('occurred_on', { ascending: false })
           .order('created_at', { ascending: false }),
+        supabase
+          .from('scheduled_payments')
+          .select('*')
+          .eq('user_id', uid)
+          .order('due_date', { ascending: true }),
+        supabase
+          .from('scheduled_payment_completions')
+          .select('*')
+          .eq('user_id', uid)
+          .order('due_date', { ascending: false }),
+        supabase
+          .from('savings_deposits')
+          .select('*')
+          .eq('user_id', uid)
+          .order('deposited_on', { ascending: false }),
       ])
 
       if (goalRes.error) throw goalRes.error
@@ -293,12 +669,18 @@ export const useFinanceStore = defineStore('finance', () => {
       if (expensesRes.error) throw expensesRes.error
       if (assetsRes.error) throw assetsRes.error
       if (assetTxRes.error) throw assetTxRes.error
+      if (schedRes.error) throw schedRes.error
+      if (schedComplRes.error) throw schedComplRes.error
+      if (savingsRes.error) throw savingsRes.error
 
       goal.value = goalRes.data as SavingsGoal | null
       bills.value = (billsRes.data ?? []) as MonthlyBill[]
       expenses.value = (expensesRes.data ?? []) as Expense[]
       assets.value = (assetsRes.data ?? []) as Asset[]
       assetTransactions.value = (assetTxRes.data ?? []) as AssetTransaction[]
+      scheduledPayments.value = (schedRes.data ?? []) as ScheduledPayment[]
+      scheduledCompletions.value = (schedComplRes.data ?? []) as ScheduledPaymentCompletion[]
+      savingsDeposits.value = (savingsRes.data ?? []) as SavingsDeposit[]
     } catch (e) {
       console.error('finance.fetchAll failed:', e)
       errorMessage.value = extractErrorMessage(e) ?? '取得に失敗しました'
@@ -327,6 +709,26 @@ export const useFinanceStore = defineStore('finance', () => {
     profile.value = data as Profile
     // 締め日が変わると期間が変わるので expenses を取り直す
     await fetchAll()
+  }
+
+  async function saveExpectedMonthlyIncome(amount: number) {
+    const auth = useAuthStore()
+    if (!auth.user) return
+    const payload = {
+      user_id: auth.user.id,
+      expected_monthly_income: amount,
+      updated_at: new Date().toISOString(),
+    }
+    const { data, error } = await supabase
+      .from('profiles')
+      .upsert(payload, { onConflict: 'user_id' })
+      .select()
+      .single()
+    if (error) {
+      errorMessage.value = error.message
+      return
+    }
+    profile.value = data as Profile
   }
 
   // 単純に asset レコードのカラム更新（履歴は残さない）
@@ -363,7 +765,7 @@ export const useFinanceStore = defineStore('finance', () => {
     const auth = useAuthStore()
     if (!auth.user) return null
     const source: AssetTransactionSource = input.source ?? 'dashboard'
-    const occurred_on = input.occurred_on ?? new Date().toISOString().slice(0, 10)
+    const occurred_on = input.occurred_on ?? formatDate(new Date())
 
     const { data, error } = await supabase
       .from('assets')
@@ -404,7 +806,7 @@ export const useFinanceStore = defineStore('finance', () => {
     await addAssetTransaction({
       asset_id: id,
       amount: delta,
-      occurred_on: occurred_on ?? new Date().toISOString().slice(0, 10),
+      occurred_on: occurred_on ?? formatDate(new Date()),
       source: 'adjustment',
       note: '',
       ledger_entry_id: null,
@@ -589,6 +991,178 @@ export const useFinanceStore = defineStore('finance', () => {
     bills.value = bills.value.filter((b) => b.id !== id)
   }
 
+  // スケジュール支払いの追加
+  async function addScheduledPayment(input: {
+    name: string
+    amount: number
+    due_date: string
+    recurring: boolean
+    recurring_end_date: string | null
+  }) {
+    const auth = useAuthStore()
+    if (!auth.user) return null
+    const { data, error } = await supabase
+      .from('scheduled_payments')
+      .insert({
+        user_id: auth.user.id,
+        name: input.name,
+        amount: input.amount,
+        due_date: input.due_date,
+        recurring: input.recurring,
+        recurring_end_date: input.recurring_end_date,
+      })
+      .select()
+      .single()
+    if (error) {
+      errorMessage.value = error.message
+      return null
+    }
+    scheduledPayments.value = [...scheduledPayments.value, data as ScheduledPayment]
+    return data as ScheduledPayment
+  }
+
+  async function updateScheduledPayment(
+    id: string,
+    patch: Partial<Pick<ScheduledPayment, 'name' | 'amount' | 'due_date' | 'recurring' | 'recurring_end_date'>>,
+  ) {
+    const payload: Record<string, unknown> = {
+      updated_at: new Date().toISOString(),
+    }
+    if (patch.name !== undefined) payload.name = patch.name
+    if (patch.amount !== undefined) payload.amount = patch.amount
+    if (patch.due_date !== undefined) payload.due_date = patch.due_date
+    if (patch.recurring !== undefined) payload.recurring = patch.recurring
+    if (patch.recurring_end_date !== undefined) payload.recurring_end_date = patch.recurring_end_date
+
+    const { data, error } = await supabase
+      .from('scheduled_payments')
+      .update(payload)
+      .eq('id', id)
+      .select()
+      .single()
+    if (error) {
+      errorMessage.value = error.message
+      return
+    }
+    scheduledPayments.value = scheduledPayments.value.map((p) =>
+      p.id === id ? (data as ScheduledPayment) : p,
+    )
+  }
+
+  async function removeScheduledPayment(id: string) {
+    const { error } = await supabase.from('scheduled_payments').delete().eq('id', id)
+    if (error) {
+      errorMessage.value = error.message
+      return
+    }
+    scheduledPayments.value = scheduledPayments.value.filter((p) => p.id !== id)
+    // 関連する完了記録もフロント側でクリア（DB側は CASCADE 済み）
+    scheduledCompletions.value = scheduledCompletions.value.filter((c) => c.payment_id !== id)
+  }
+
+  // 貯金の記録
+  async function addSavingsDeposit(input: {
+    goal_id: string
+    amount: number
+    deposited_on?: string
+    period_start?: string
+    note?: string
+  }) {
+    const auth = useAuthStore()
+    if (!auth.user) return null
+    const deposited_on = input.deposited_on ?? formatDate(new Date())
+    const period_start = input.period_start ?? periodStartStr.value
+
+    const { data, error } = await supabase
+      .from('savings_deposits')
+      .insert({
+        user_id: auth.user.id,
+        goal_id: input.goal_id,
+        amount: input.amount,
+        deposited_on,
+        period_start,
+        note: input.note ?? '',
+      })
+      .select()
+      .single()
+    if (error) {
+      errorMessage.value = error.message
+      return null
+    }
+    savingsDeposits.value = [data as SavingsDeposit, ...savingsDeposits.value]
+    return data as SavingsDeposit
+  }
+
+  async function updateSavingsDeposit(
+    id: string,
+    patch: Partial<Pick<SavingsDeposit, 'amount' | 'deposited_on' | 'note'>>,
+  ) {
+    const payload: Record<string, unknown> = {}
+    if (patch.amount !== undefined) payload.amount = patch.amount
+    if (patch.deposited_on !== undefined) payload.deposited_on = patch.deposited_on
+    if (patch.note !== undefined) payload.note = patch.note
+    const { data, error } = await supabase
+      .from('savings_deposits')
+      .update(payload)
+      .eq('id', id)
+      .select()
+      .single()
+    if (error) {
+      errorMessage.value = error.message
+      return
+    }
+    savingsDeposits.value = savingsDeposits.value.map((d) =>
+      d.id === id ? (data as SavingsDeposit) : d,
+    )
+  }
+
+  async function removeSavingsDeposit(id: string) {
+    const { error } = await supabase.from('savings_deposits').delete().eq('id', id)
+    if (error) {
+      errorMessage.value = error.message
+      return
+    }
+    savingsDeposits.value = savingsDeposits.value.filter((d) => d.id !== id)
+  }
+
+  // 「支払い完了」を記録
+  async function completeScheduledPayment(payment_id: string, due_date: string) {
+    const auth = useAuthStore()
+    if (!auth.user) return
+    const { data, error } = await supabase
+      .from('scheduled_payment_completions')
+      .insert({
+        user_id: auth.user.id,
+        payment_id,
+        due_date,
+      })
+      .select()
+      .single()
+    if (error) {
+      errorMessage.value = error.message
+      return
+    }
+    scheduledCompletions.value = [
+      data as ScheduledPaymentCompletion,
+      ...scheduledCompletions.value,
+    ]
+  }
+
+  // 「完了」を取り消し
+  async function uncompleteScheduledPayment(completionId: string) {
+    const { error } = await supabase
+      .from('scheduled_payment_completions')
+      .delete()
+      .eq('id', completionId)
+    if (error) {
+      errorMessage.value = error.message
+      return
+    }
+    scheduledCompletions.value = scheduledCompletions.value.filter(
+      (c) => c.id !== completionId,
+    )
+  }
+
   async function addEntry(input: {
     name: string
     amount: number
@@ -626,7 +1200,7 @@ export const useFinanceStore = defineStore('finance', () => {
   }) {
     const trimmed = input.name.trim()
     if (!trimmed || input.amount <= 0) return
-    const occurred_on = input.spent_on ?? new Date().toISOString().slice(0, 10)
+    const occurred_on = input.spent_on ?? formatDate(new Date())
 
     // まず家計簿へ記録（IDを取り出して履歴に紐付ける）
     const entry = await addEntry({
@@ -680,6 +1254,9 @@ export const useFinanceStore = defineStore('finance', () => {
     expenses.value = []
     assets.value = []
     assetTransactions.value = []
+    scheduledPayments.value = []
+    scheduledCompletions.value = []
+    savingsDeposits.value = []
     errorMessage.value = null
   }
 
@@ -689,10 +1266,14 @@ export const useFinanceStore = defineStore('finance', () => {
     bills,
     expenses,
     assets,
+    scheduledPayments,
+    scheduledCompletions,
+    savingsDeposits,
     loading,
     errorMessage,
     totalAssets,
     monthCloseDay,
+    expectedMonthlyIncome,
     totalMonthlyBills,
     goalTargetAmount,
     periodStart,
@@ -700,10 +1281,20 @@ export const useFinanceStore = defineStore('finance', () => {
     daysLeftInPeriod,
     monthsToGoal,
     monthlySavingContribution,
+    totalSavedForGoal,
+    remainingToSave,
+    goalProgress,
+    isGoalAchieved,
+    savingsForCurrentPeriod,
+    hasDepositedThisPeriod,
+    totalSavedThisPeriod,
+    shouldRemindDeposit,
     totalSpentThisPeriod,
+    totalSpentBeforeToday,
     totalIncomeThisPeriod,
     spentToday,
     spendableThisPeriod,
+    spendableAtStartOfToday,
     isOverBudget,
     dailySpendable,
     weeklySpendable,
@@ -713,8 +1304,21 @@ export const useFinanceStore = defineStore('finance', () => {
     entriesOnDate,
     assetTransactions,
     transactionsForAsset,
+    scheduledPaymentsInPeriod,
+    totalScheduledInPeriod,
+    totalScheduledUnpaidInPeriod,
+    totalScheduledPaidInPeriod,
+    paymentsToday,
+    paymentsTodayTotal,
+    overduePayments,
+    upcomingPayments,
+    paymentsNeedingAttention,
+    remainingOccurrencesForPayment,
+    forecastForPeriod,
+    nextMonthDailyBudget,
     fetchAll,
     saveMonthCloseDay,
+    saveExpectedMonthlyIncome,
     saveGoal,
     deleteGoal,
     addAsset,
@@ -726,6 +1330,14 @@ export const useFinanceStore = defineStore('finance', () => {
     removeAssetTransaction,
     addBill,
     removeBill,
+    addScheduledPayment,
+    updateScheduledPayment,
+    removeScheduledPayment,
+    completeScheduledPayment,
+    uncompleteScheduledPayment,
+    addSavingsDeposit,
+    updateSavingsDeposit,
+    removeSavingsDeposit,
     addEntry,
     addIncomeToAsset,
     removeEntry,
